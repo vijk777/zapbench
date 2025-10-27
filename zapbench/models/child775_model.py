@@ -53,7 +53,7 @@ class CosineAnnealingWarmRestarts(keras.callbacks.Callback):
         # Set the optimizer's learning rate using assign for tf.Variable
         self.model.optimizer.learning_rate.assign(current_lr)
         self.lrs.append(current_lr)
-        # print(f"Epoch {epoch+1}: Learning rate set to {current_lr:.6f}") # For debugging
+        print(f"Epoch {epoch+1}: Learning rate set to {current_lr:.6f}") # For debugging
 
 
 # Custom Residual Block Layer
@@ -420,26 +420,26 @@ class Model(keras.Model):
             validation_dataset = validation_dataset.map(
                 self._prepare_targets_for_training, num_parallel_calls=tf.data.AUTOTUNE
             ).prefetch(tf.data.AUTOTUNE)
-            # EarlyStopping remains
-            callbacks.append(
-                keras.callbacks.EarlyStopping(
-                    monitor="val_loss",
-                    patience=20,
-                    restore_best_weights=True,
-                    verbose=1,
-                )
-            )
+            # # EarlyStopping remains
+            # callbacks.append(
+            #     keras.callbacks.EarlyStopping(
+            #         monitor="val_loss",
+            #         patience=20,
+            #         restore_best_weights=True,
+            #         verbose=1,
+            #     )
+            # )
         # Add Cosine Annealing Warm Restarts Learning Rate Callback
-        initial_lr_for_schedule = 1e-3  # Starting LR for the first cycle
+        initial_lr_for_schedule = 1e-4  # Starting LR for the first cycle
         first_decay_epochs = 10  # Length of the first LR cycle in epochs
-        callbacks.append(
-            CosineAnnealingWarmRestarts(
-                initial_lr=initial_lr_for_schedule,
-                first_decay_steps=first_decay_epochs,
-                t_mul=2.0,  # Double cycle length each restart
-                m_mul=1.0,  # Keep max LR constant each restart
-            )
-        )
+        # callbacks.append(
+        #     CosineAnnealingWarmRestarts(
+        #         initial_lr=initial_lr_for_schedule,
+        #         first_decay_steps=first_decay_epochs,
+        #         t_mul=2.0,  # Double cycle length each restart
+        #         m_mul=1.0,  # Keep max LR constant each restart
+        #     )
+        # )
         # Compile the model with Adam optimizer and MAE loss.
         # The learning rate is now managed by the CosineAnnealingWarmRestarts callback.
         self.compile(
@@ -447,7 +447,7 @@ class Model(keras.Model):
             loss="mae",
         )
         # Use the parent's fit method
-        super().fit(
+        history = super().fit(
             train_dataset,
             epochs=epochs,
             validation_data=validation_dataset,
@@ -455,6 +455,7 @@ class Model(keras.Model):
             verbose=1,  # Show Keras training progress bar
         )
         print(f"Training completed after {epochs} epochs (or early stopping).")
+        return history
 
     def predict_non_batched(self, series_input: np.ndarray) -> np.ndarray:
         """Predict the series_output for a single timestep given the series_input.

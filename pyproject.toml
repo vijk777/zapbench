@@ -2,7 +2,7 @@
 name = "zapbench"
 description = "ZAPBench: Zebrafish Activity Prediction Benchmark"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {file = "LICENSE"}
 authors = [{name = "ZAPBench authors", email="zapbench@google.com"}]
 classifiers = [  # List of https://pypi.org/classifiers/
@@ -36,6 +36,7 @@ dependencies = [
   "scikit-learn",  # required for connectomics.jax.metrics
   "scikit-image",
   "tensorstore",
+  "tensorflow[and-cuda]",
   "tensorflow-probability",  # required by distrax
   "tf-keras",  # required by tensorflow-probability
 ]
