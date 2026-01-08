@@ -101,7 +101,7 @@ def main():
     end_t = args.end_t
     batch_size = end_t - start_t
 
-    print(f"Extracting raw fluorescence for timesteps [{start_t}, {end_t})")
+    print(f"Extracting raw fluorescence for timesteps [{start_t}, {end_t})", flush=True)
 
     # Load metadata
     metadata = load_metadata(args.output_zarr)
@@ -118,22 +118,22 @@ def main():
     if start_t < 0 or end_t > num_timesteps or start_t >= end_t:
         raise ValueError(f"Invalid range [{start_t}, {end_t}) for {num_timesteps} timesteps")
 
-    print(f"  Source: {gs_uri}")
-    print(f"  Pixels: {num_pixels:,}")
-    print(f"  Batch size: {batch_size}")
+    print(f"  Source: {gs_uri}", flush=True)
+    print(f"  Pixels: {num_pixels:,}", flush=True)
+    print(f"  Batch size: {batch_size}", flush=True)
 
     # Open source data
-    print("Opening source data...")
+    print("Opening source data...", flush=True)
     ds_flow, ds_raw = open_source_data(gs_uri)
 
     # Open output arrays
-    print("Opening output arrays...")
+    print("Opening output arrays...", flush=True)
     out_raw_values = open_output_array(args.output_zarr, 'raw_values')
     out_raw_z = open_output_array(args.output_zarr, 'raw_z')
     out_acq_time = open_output_array(args.output_zarr, 'acquisition_time')
 
     # Load precomputed coordinates
-    print("Loading precomputed coordinates...")
+    print("Loading precomputed coordinates...", flush=True)
     aligned_coords = open_output_array(args.output_zarr, 'aligned_coords').read().result()
     grid_coords = open_output_array(args.output_zarr, 'grid_coords').read().result()
 
@@ -145,7 +145,7 @@ def main():
     gz = grid_coords[:, 2]
 
     # Allocate output buffers
-    print("Allocating buffers...")
+    print("Allocating buffers...", flush=True)
     raw_values_batch = np.empty((num_pixels, batch_size), dtype=np.uint16)
     raw_z_batch = np.empty((num_pixels, batch_size), dtype=np.int16)
     acq_time_batch = np.empty((num_pixels, batch_size), dtype=np.uint32)
@@ -154,10 +154,9 @@ def main():
     offset_scale = np.array([1, 1, 4], dtype=np.float32)
 
     # Process each timestep
-    print("Processing timesteps...")
+    print("Processing timesteps...", flush=True)
     for t_idx, T in enumerate(range(start_t, end_t)):
-        if t_idx % 10 == 0:
-            print(f"  T={T} ({t_idx + 1}/{batch_size})")
+        print(f"  T={T} ({t_idx + 1}/{batch_size})", flush=True)
 
         # Read flow field offsets for all pixels at time T
         # Flow field shape: [3, fz, fy, fx, t]
@@ -182,12 +181,12 @@ def main():
         acq_time_batch[:, t_idx] = T * MS_PER_TIMESTEP + raw_z * MS_PER_Z
 
     # Write batch to output
-    print(f"Writing batch to zarr [:, {start_t}:{end_t}]...")
+    print(f"Writing batch to zarr [:, {start_t}:{end_t}]...", flush=True)
     out_raw_values[:, start_t:end_t].write(raw_values_batch).result()
     out_raw_z[:, start_t:end_t].write(raw_z_batch).result()
     out_acq_time[:, start_t:end_t].write(acq_time_batch).result()
 
-    print(f"Done. Processed {batch_size} timesteps.")
+    print(f"Done. Processed {batch_size} timesteps.", flush=True)
 
 
 if __name__ == "__main__":

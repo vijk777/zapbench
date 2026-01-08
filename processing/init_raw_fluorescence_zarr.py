@@ -30,6 +30,10 @@ STRIDE_X = 16
 STRIDE_Y = 16
 STRIDE_Z = 2
 
+# Chunk size along pixel dimension (must keep chunk < 2GB for Blosc)
+# 1M pixels * 100 timesteps * 2 bytes = 200MB per chunk
+PIXEL_CHUNK_SIZE = 1_000_000
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -58,14 +62,14 @@ def parse_args():
 
 def load_segmentation(gs_uri: str) -> np.ndarray:
     """Load segmentation volume from GCS."""
-    print(f"Loading segmentation from {gs_uri}/segmentation...")
+    print(f"Loading segmentation from {gs_uri}/segmentation...", flush=True)
     ds = ts.open({
         'open': True,
         'driver': 'zarr3',
         'kvstore': f'{gs_uri}/segmentation'
     }).result()
     segmentation = ds.read().result()
-    print(f"  Shape: {segmentation.shape}, dtype: {segmentation.dtype}")
+    print(f"  Shape: {segmentation.shape}, dtype: {segmentation.dtype}", flush=True)
     return segmentation
 
 
@@ -77,22 +81,22 @@ def extract_and_sort_coordinates(segmentation: np.ndarray):
         gx, gy, gz: Flow field grid coordinates (sorted by cell_id)
         cell_ids: Cell IDs (sorted, 0-indexed)
     """
-    print("Extracting labeled voxel coordinates...")
+    print("Extracting labeled voxel coordinates...", flush=True)
     xi, yi, zi = np.where(segmentation > 0)
     cell_ids = segmentation[xi, yi, zi].astype(np.uint64) - 1  # 0-indexed
 
     num_pixels = len(xi)
     num_cells = cell_ids.max() + 1
-    print(f"  Found {num_pixels:,} labeled pixels across {num_cells:,} cells")
+    print(f"  Found {num_pixels:,} labeled pixels across {num_cells:,} cells", flush=True)
 
-    print("Sorting by cell ID for contiguous grouping...")
+    print("Sorting by cell ID for contiguous grouping...", flush=True)
     sort_idx = np.argsort(cell_ids)
     xi = xi[sort_idx].astype(np.int32)
     yi = yi[sort_idx].astype(np.int32)
     zi = zi[sort_idx].astype(np.int32)
     cell_ids = cell_ids[sort_idx]
 
-    print("Computing grid coordinates...")
+    print("Computing grid coordinates...", flush=True)
     gx = (xi // STRIDE_X).astype(np.int32)
     gy = (yi // STRIDE_Y).astype(np.int32)
     gz = (zi // STRIDE_Z).astype(np.int32)
@@ -129,38 +133,41 @@ def create_tensorstore_array(path: str, name: str, shape: tuple, chunks: tuple, 
 
 def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     """Create output zarr with proper structure and chunking."""
-    print(f"Creating output zarr at {output_path}...")
+    print(f"Creating output zarr at {output_path}...", flush=True)
     os.makedirs(output_path, exist_ok=True)
 
     arrays = {}
 
-    # Time-varying arrays: chunk along time axis aligned to batch size
-    print(f"  Creating raw_values [{num_pixels}, {SIZE_T}], chunks=[{num_pixels}, {batch_size}]")
+    # Time-varying arrays: chunk along both dimensions
+    # Pixel chunks must be small enough to stay under Blosc 2GB limit
+    pixel_chunk = min(PIXEL_CHUNK_SIZE, num_pixels)
+
+    print(f"  Creating raw_values [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
     arrays['raw_values'] = create_tensorstore_array(
         output_path, 'raw_values',
         shape=(num_pixels, SIZE_T),
-        chunks=(num_pixels, batch_size),
+        chunks=(pixel_chunk, batch_size),
         dtype='uint16',
     )
 
-    print(f"  Creating raw_z [{num_pixels}, {SIZE_T}], chunks=[{num_pixels}, {batch_size}]")
+    print(f"  Creating raw_z [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
     arrays['raw_z'] = create_tensorstore_array(
         output_path, 'raw_z',
         shape=(num_pixels, SIZE_T),
-        chunks=(num_pixels, batch_size),
+        chunks=(pixel_chunk, batch_size),
         dtype='int16',
     )
 
-    print(f"  Creating acquisition_time [{num_pixels}, {SIZE_T}], chunks=[{num_pixels}, {batch_size}]")
+    print(f"  Creating acquisition_time [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
     arrays['acquisition_time'] = create_tensorstore_array(
         output_path, 'acquisition_time',
         shape=(num_pixels, SIZE_T),
-        chunks=(num_pixels, batch_size),
+        chunks=(pixel_chunk, batch_size),
         dtype='uint32',
     )
 
     # Static arrays: single chunk
-    print(f"  Creating cell_ids [{num_pixels}]")
+    print(f"  Creating cell_ids [{num_pixels}]", flush=True)
     arrays['cell_ids'] = create_tensorstore_array(
         output_path, 'cell_ids',
         shape=(num_pixels,),
@@ -168,7 +175,7 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
         dtype='uint64',
     )
 
-    print(f"  Creating aligned_coords [{num_pixels}, 3]")
+    print(f"  Creating aligned_coords [{num_pixels}, 3]", flush=True)
     arrays['aligned_coords'] = create_tensorstore_array(
         output_path, 'aligned_coords',
         shape=(num_pixels, 3),
@@ -176,7 +183,7 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
         dtype='int32',
     )
 
-    print(f"  Creating grid_coords [{num_pixels}, 3]")
+    print(f"  Creating grid_coords [{num_pixels}, 3]", flush=True)
     arrays['grid_coords'] = create_tensorstore_array(
         output_path, 'grid_coords',
         shape=(num_pixels, 3),
@@ -187,13 +194,14 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     return arrays
 
 
-def write_metadata(output_path: str, gs_uri: str, batch_size: int, num_pixels: int):
+def write_metadata(output_path: str, gs_uri: str, batch_size: int, num_pixels: int, pixel_chunk: int):
     """Write metadata JSON file."""
     metadata = {
         'gs_uri': gs_uri,
         'batch_size': batch_size,
         'num_pixels': num_pixels,
         'num_timesteps': SIZE_T,
+        'pixel_chunk_size': pixel_chunk,
         'stride_x': STRIDE_X,
         'stride_y': STRIDE_Y,
         'stride_z': STRIDE_Z,
@@ -201,25 +209,25 @@ def write_metadata(output_path: str, gs_uri: str, batch_size: int, num_pixels: i
     metadata_path = os.path.join(output_path, 'metadata.json')
     with open(metadata_path, 'w') as f:
         json.dump(metadata, f, indent=2)
-    print(f"  Wrote metadata to {metadata_path}")
+    print(f"  Wrote metadata to {metadata_path}", flush=True)
 
 
 def write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids):
     """Write static arrays to zarr."""
-    print("Writing static arrays...")
+    print("Writing static arrays...", flush=True)
 
-    print("  Writing cell_ids...")
+    print("  Writing cell_ids...", flush=True)
     arrays['cell_ids'].write(cell_ids).result()
 
-    print("  Writing aligned_coords...")
+    print("  Writing aligned_coords...", flush=True)
     aligned_coords = np.stack([xi, yi, zi], axis=1)
     arrays['aligned_coords'].write(aligned_coords).result()
 
-    print("  Writing grid_coords...")
+    print("  Writing grid_coords...", flush=True)
     grid_coords = np.stack([gx, gy, gz], axis=1)
     arrays['grid_coords'].write(grid_coords).result()
 
-    print("Static arrays written successfully.")
+    print("Static arrays written successfully.", flush=True)
 
 
 def main():
@@ -234,18 +242,19 @@ def main():
 
     # Create output zarr
     arrays = create_output_zarr(args.output_zarr, num_pixels, args.batch_size)
+    pixel_chunk = min(PIXEL_CHUNK_SIZE, num_pixels)
 
     # Write metadata
-    write_metadata(args.output_zarr, args.gs_uri, args.batch_size, num_pixels)
+    write_metadata(args.output_zarr, args.gs_uri, args.batch_size, num_pixels, pixel_chunk)
 
     # Write static arrays
     write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids)
 
-    print(f"\nInitialization complete: {args.output_zarr}")
-    print(f"  {num_pixels:,} pixels, {SIZE_T} timesteps")
-    print(f"  Batch size: {args.batch_size}")
-    print(f"\nNext step: Submit batch extraction jobs with:")
-    print(f"  python extract_raw_fluorescence.py --start-t <start> --end-t <end> --output-zarr {args.output_zarr}")
+    print(f"\nInitialization complete: {args.output_zarr}", flush=True)
+    print(f"  {num_pixels:,} pixels, {SIZE_T} timesteps", flush=True)
+    print(f"  Batch size: {args.batch_size}", flush=True)
+    print(f"\nNext step: Submit batch extraction jobs with:", flush=True)
+    print(f"  python extract_raw_fluorescence.py --start-t <start> --end-t <end> --output-zarr {args.output_zarr}", flush=True)
 
 
 if __name__ == "__main__":
