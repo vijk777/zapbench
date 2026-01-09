@@ -8,16 +8,19 @@ Usage:
 """
 
 import argparse
-import json
-import os
 
 import numpy as np
-import tensorstore as ts
 
-os.environ['BLOSC_NTHREADS'] = '2'
-os.environ['OMP_NUM_THREADS'] = '2'
+from zarr_utils import (
+    TIME_CHUNK_SIZE,
+    set_thread_limits,
+    open_array,
+    create_array,
+    load_metadata,
+    compute_cell_boundaries,
+)
 
-TIME_CHUNK_SIZE = 100
+set_thread_limits(2)
 
 
 def parse_args():
@@ -33,58 +36,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def open_array(zarr_path: str, name: str):
-    """Open a zarr array for reading."""
-    return ts.open({
-        'driver': 'zarr3',
-        'kvstore': {
-            'driver': 'file',
-            'path': os.path.join(zarr_path, name),
-        },
-        'open': True,
-    }).result()
-
-
-def create_array(zarr_path: str, name: str, shape: tuple, chunks: tuple, dtype: str):
-    """Create a zarr3 array."""
-    spec = {
-        'driver': 'zarr3',
-        'kvstore': {
-            'driver': 'file',
-            'path': os.path.join(zarr_path, name),
-        },
-        'metadata': {
-            'shape': list(shape),
-            'chunk_grid': {
-                'name': 'regular',
-                'configuration': {'chunk_shape': list(chunks)}
-            },
-            'data_type': dtype,
-            'codecs': [
-                {'name': 'transpose', 'configuration': {'order': list(range(len(shape) - 1, -1, -1))}},
-                {'name': 'bytes', 'configuration': {'endian': 'little'}},
-                {'name': 'blosc', 'configuration': {'cname': 'zstd', 'clevel': 4, 'shuffle': 'shuffle'}}
-            ],
-        },
-        'create': True,
-        'delete_existing': True,
-    }
-    return ts.open(spec).result()
-
-
 def main():
     args = parse_args()
 
     print(f"Zarr: {args.zarr}", flush=True)
 
     # Load metadata
-    metadata_path = os.path.join(args.zarr, 'metadata.json')
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-
-    num_pixels = metadata['num_pixels']
+    metadata = load_metadata(args.zarr)
     num_timesteps = metadata['num_timesteps']
-    print(f"Data: {num_pixels:,} pixels, {num_timesteps} timesteps", flush=True)
+    print(f"Data: {metadata['num_pixels']:,} pixels, {num_timesteps} timesteps", flush=True)
 
     # Open input arrays
     print("Opening input arrays...", flush=True)
@@ -94,10 +54,8 @@ def main():
     num_cells = int(cell_ids.max()) + 1
     print(f"Cells: {num_cells:,}", flush=True)
 
-    # Precompute cell boundaries (cell_ids are sorted)
-    cell_boundaries = np.searchsorted(cell_ids, np.arange(num_cells + 1))
-    pixels_per_cell = np.diff(cell_boundaries).astype(np.float64)
-    pixels_per_cell = np.maximum(pixels_per_cell, 1)
+    # Precompute cell boundaries
+    cell_boundaries, pixels_per_cell = compute_cell_boundaries(cell_ids, num_cells)
 
     # Output array
     cell_acquisition_ms = np.zeros((num_cells, num_timesteps), dtype=np.uint32)

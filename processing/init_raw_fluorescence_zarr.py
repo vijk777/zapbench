@@ -18,21 +18,16 @@ Usage:
 import argparse
 import json
 import os
+
 import numpy as np
 import tensorstore as ts
 
-
-# Volume dimensions
-SIZE_X, SIZE_Y, SIZE_Z, SIZE_T = 2048, 1328, 72, 7879
-
-# Flow field grid strides (aligned space pixels per grid point)
-STRIDE_X = 16
-STRIDE_Y = 16
-STRIDE_Z = 2
-
-# Chunk size along pixel dimension (must keep chunk < 2GB for Blosc)
-# 1M pixels * 100 timesteps * 2 bytes = 200MB per chunk
-PIXEL_CHUNK_SIZE = 1_000_000
+from zarr_utils import (
+    SIZE_T,
+    STRIDE_X, STRIDE_Y, STRIDE_Z,
+    PIXEL_CHUNK_SIZE,
+    create_array,
+)
 
 
 def parse_args():
@@ -104,33 +99,6 @@ def extract_and_sort_coordinates(segmentation: np.ndarray):
     return xi, yi, zi, gx, gy, gz, cell_ids
 
 
-def create_tensorstore_array(path: str, name: str, shape: tuple, chunks: tuple, dtype: str):
-    """Create a zarr3 array using tensorstore."""
-    spec = {
-        'driver': 'zarr3',
-        'kvstore': {
-            'driver': 'file',
-            'path': os.path.join(path, name),
-        },
-        'metadata': {
-            'shape': list(shape),
-            'chunk_grid': {
-                'name': 'regular',
-                'configuration': {'chunk_shape': list(chunks)}
-            },
-            'data_type': dtype,
-            'codecs': [
-                {'name': 'transpose', 'configuration': {'order': list(range(len(shape) - 1, -1, -1))}},
-                {'name': 'bytes', 'configuration': {'endian': 'little'}},
-                {'name': 'blosc', 'configuration': {'cname': 'zstd', 'clevel': 4, 'shuffle': 'shuffle'}}
-            ],
-        },
-        'create': True,
-        'delete_existing': True,
-    }
-    return ts.open(spec).result()
-
-
 def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     """Create output zarr with proper structure and chunking."""
     print(f"Creating output zarr at {output_path}...", flush=True)
@@ -139,11 +107,10 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     arrays = {}
 
     # Time-varying arrays: chunk along both dimensions
-    # Pixel chunks must be small enough to stay under Blosc 2GB limit
     pixel_chunk = min(PIXEL_CHUNK_SIZE, num_pixels)
 
     print(f"  Creating raw_values [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
-    arrays['raw_values'] = create_tensorstore_array(
+    arrays['raw_values'] = create_array(
         output_path, 'raw_values',
         shape=(num_pixels, SIZE_T),
         chunks=(pixel_chunk, batch_size),
@@ -151,7 +118,7 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     )
 
     print(f"  Creating raw_z [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
-    arrays['raw_z'] = create_tensorstore_array(
+    arrays['raw_z'] = create_array(
         output_path, 'raw_z',
         shape=(num_pixels, SIZE_T),
         chunks=(pixel_chunk, batch_size),
@@ -159,7 +126,7 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     )
 
     print(f"  Creating acquisition_time [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
-    arrays['acquisition_time'] = create_tensorstore_array(
+    arrays['acquisition_time'] = create_array(
         output_path, 'acquisition_time',
         shape=(num_pixels, SIZE_T),
         chunks=(pixel_chunk, batch_size),
@@ -168,7 +135,7 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
 
     # Static arrays: single chunk
     print(f"  Creating cell_ids [{num_pixels}]", flush=True)
-    arrays['cell_ids'] = create_tensorstore_array(
+    arrays['cell_ids'] = create_array(
         output_path, 'cell_ids',
         shape=(num_pixels,),
         chunks=(num_pixels,),
@@ -176,7 +143,7 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     )
 
     print(f"  Creating aligned_coords [{num_pixels}, 3]", flush=True)
-    arrays['aligned_coords'] = create_tensorstore_array(
+    arrays['aligned_coords'] = create_array(
         output_path, 'aligned_coords',
         shape=(num_pixels, 3),
         chunks=(num_pixels, 3),
@@ -184,7 +151,7 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
     )
 
     print(f"  Creating grid_coords [{num_pixels}, 3]", flush=True)
-    arrays['grid_coords'] = create_tensorstore_array(
+    arrays['grid_coords'] = create_array(
         output_path, 'grid_coords',
         shape=(num_pixels, 3),
         chunks=(num_pixels, 3),

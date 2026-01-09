@@ -18,10 +18,11 @@ Usage:
 """
 
 import argparse
-import json
-import os
+
 import numpy as np
 import tensorstore as ts
+
+from zarr_utils import load_metadata, open_array
 
 
 # Acquisition timing constants
@@ -52,30 +53,6 @@ def parse_args():
         help="Path to output zarr directory (must be initialized)",
     )
     return parser.parse_args()
-
-
-def load_metadata(output_path: str) -> dict:
-    """Load metadata from initialized zarr."""
-    metadata_path = os.path.join(output_path, 'metadata.json')
-    if not os.path.exists(metadata_path):
-        raise FileNotFoundError(
-            f"Metadata not found at {metadata_path}. "
-            "Run init_raw_fluorescence_zarr.py first."
-        )
-    with open(metadata_path, 'r') as f:
-        return json.load(f)
-
-
-def open_output_array(output_path: str, name: str):
-    """Open an existing zarr array for reading or writing."""
-    return ts.open({
-        'driver': 'zarr3',
-        'kvstore': {
-            'driver': 'file',
-            'path': os.path.join(output_path, name),
-        },
-        'open': True,
-    }).result()
 
 
 def open_source_data(gs_uri: str):
@@ -128,14 +105,14 @@ def main():
 
     # Open output arrays
     print("Opening output arrays...", flush=True)
-    out_raw_values = open_output_array(args.output_zarr, 'raw_values')
-    out_raw_z = open_output_array(args.output_zarr, 'raw_z')
-    out_acq_time = open_output_array(args.output_zarr, 'acquisition_time')
+    out_raw_values = open_array(args.output_zarr, 'raw_values')
+    out_raw_z = open_array(args.output_zarr, 'raw_z')
+    out_acq_time = open_array(args.output_zarr, 'acquisition_time')
 
     # Load precomputed coordinates
     print("Loading precomputed coordinates...", flush=True)
-    aligned_coords = open_output_array(args.output_zarr, 'aligned_coords').read().result()
-    grid_coords = open_output_array(args.output_zarr, 'grid_coords').read().result()
+    aligned_coords = open_array(args.output_zarr, 'aligned_coords').read().result()
+    grid_coords = open_array(args.output_zarr, 'grid_coords').read().result()
 
     xi = aligned_coords[:, 0]
     yi = aligned_coords[:, 1]

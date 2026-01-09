@@ -17,17 +17,22 @@ Usage:
 """
 
 import argparse
-import json
-import os
 
 import numpy as np
-import tensorstore as ts
 from scipy.ndimage import gaussian_filter
 
-# Limit threads to avoid oversubscription on cluster
-os.environ['BLOSC_NTHREADS'] = '2'
-os.environ['OMP_NUM_THREADS'] = '2'
-os.environ['NUMEXPR_MAX_THREADS'] = '2'
+from zarr_utils import (
+    VOLUME_SHAPE,
+    TIME_CHUNK_SIZE,
+    set_thread_limits,
+    open_array,
+    create_array,
+    load_metadata,
+    save_metadata,
+    compute_cell_boundaries,
+)
+
+set_thread_limits(2)
 
 # Spatial binning parameters
 BIN_STRIDE_X = 64
@@ -38,7 +43,6 @@ GAUSSIAN_SIGMA = 2
 # Processing parameters
 PERCENTILE = 10
 PIXEL_CHUNK_SIZE = 100_000  # pixels per chunk for percentile computation
-TIME_CHUNK_SIZE = 100  # timesteps per chunk for aggregation
 
 
 def parse_args():
@@ -54,48 +58,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def open_array(zarr_path: str, name: str):
-    """Open a zarr array for reading."""
-    return ts.open({
-        'driver': 'zarr3',
-        'kvstore': {
-            'driver': 'file',
-            'path': os.path.join(zarr_path, name),
-        },
-        'open': True,
-    }).result()
-
-
-def create_array(zarr_path: str, name: str, shape: tuple, chunks: tuple, dtype: str):
-    """Create a zarr3 array."""
-    spec = {
-        'driver': 'zarr3',
-        'kvstore': {
-            'driver': 'file',
-            'path': os.path.join(zarr_path, name),
-        },
-        'metadata': {
-            'shape': list(shape),
-            'chunk_grid': {
-                'name': 'regular',
-                'configuration': {'chunk_shape': list(chunks)}
-            },
-            'data_type': dtype,
-            'codecs': [
-                {'name': 'transpose', 'configuration': {'order': list(range(len(shape) - 1, -1, -1))}},
-                {'name': 'bytes', 'configuration': {'endian': 'little'}},
-                {'name': 'blosc', 'configuration': {'cname': 'zstd', 'clevel': 4, 'shuffle': 'shuffle'}}
-            ],
-        },
-        'create': True,
-        'delete_existing': True,
-    }
-    return ts.open(spec).result()
-
-
 def compute_percentile_chunked(raw_values, percentile: int, chunk_size: int) -> np.ndarray:
     """Compute percentile over time for each pixel, processing in chunks."""
-    num_pixels, num_timesteps = raw_values.shape
+    num_pixels = raw_values.shape[0]
     F0 = np.empty(num_pixels, dtype=np.float32)
 
     num_chunks = (num_pixels + chunk_size - 1) // chunk_size
@@ -167,26 +132,19 @@ def fit_smooth_spatial_field(F0: np.ndarray, aligned_coords: np.ndarray, volume_
     return A_hat, A_hat_grid
 
 
-def compute_cell_activity(
+def aggregate_cell_activity(
     raw_values,
     A_hat: np.ndarray,
-    cell_ids: np.ndarray,
+    cell_boundaries: np.ndarray,
+    pixels_per_cell: np.ndarray,
     num_cells: int,
+    num_timesteps: int,
     time_chunk_size: int
 ) -> np.ndarray:
     """Compute corrected activity and aggregate per cell.
 
     Streams through time chunks to avoid loading full array.
     """
-    num_pixels, num_timesteps = raw_values.shape
-
-    # Precompute cell boundaries (cell_ids are sorted)
-    cell_boundaries = np.searchsorted(cell_ids, np.arange(num_cells + 1))
-    pixels_per_cell = np.diff(cell_boundaries).astype(np.float32)
-
-    # Handle cells with zero pixels (shouldn't happen but be safe)
-    pixels_per_cell = np.maximum(pixels_per_cell, 1)
-
     # Output array
     cell_activity = np.zeros((num_cells, num_timesteps), dtype=np.float32)
 
@@ -215,13 +173,9 @@ def main():
     print(f"Zarr: {args.zarr}", flush=True)
 
     # Load metadata
-    metadata_path = os.path.join(args.zarr, 'metadata.json')
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-
-    num_pixels = metadata['num_pixels']
+    metadata = load_metadata(args.zarr)
     num_timesteps = metadata['num_timesteps']
-    print(f"Data: {num_pixels:,} pixels, {num_timesteps} timesteps", flush=True)
+    print(f"Data: {metadata['num_pixels']:,} pixels, {num_timesteps} timesteps", flush=True)
 
     # Open input arrays
     print("Opening input arrays...", flush=True)
@@ -232,9 +186,6 @@ def main():
     num_cells = int(cell_ids.max()) + 1
     print(f"Cells: {num_cells:,}", flush=True)
 
-    # Volume shape (from init script constants)
-    volume_shape = (2048, 1328, 72)
-
     # Step 1: Compute F0 (10th percentile per pixel)
     print("\nStep 1: Computing F0 (10th percentile)...", flush=True)
     F0 = compute_percentile_chunked(raw_values, PERCENTILE, PIXEL_CHUNK_SIZE)
@@ -242,18 +193,22 @@ def main():
 
     # Step 2: Fit smooth spatial field
     print("\nStep 2: Fitting smooth spatial field...", flush=True)
-    A_hat, A_hat_grid = fit_smooth_spatial_field(F0, aligned_coords, volume_shape)
+    A_hat, A_hat_grid = fit_smooth_spatial_field(F0, aligned_coords, VOLUME_SHAPE)
     print(f"  A_hat range: [{A_hat.min():.1f}, {A_hat.max():.1f}]", flush=True)
 
     # Step 3: Compute corrected activity and aggregate per cell
     print("\nStep 3: Computing cell activity...", flush=True)
-    cell_activity = compute_cell_activity(
-        raw_values, A_hat, cell_ids, num_cells, TIME_CHUNK_SIZE
+    cell_boundaries, pixels_per_cell = compute_cell_boundaries(cell_ids, num_cells)
+    cell_activity = aggregate_cell_activity(
+        raw_values, A_hat, cell_boundaries, pixels_per_cell.astype(np.float32),
+        num_cells, num_timesteps, TIME_CHUNK_SIZE
     )
     print(f"  cell_activity range: [{cell_activity.min():.1f}, {cell_activity.max():.1f}]", flush=True)
 
     # Write outputs to existing zarr
     print("\nWriting outputs...", flush=True)
+
+    num_pixels = len(F0)
 
     # baseline_F0
     print("  Writing baseline_F0...", flush=True)
@@ -286,9 +241,7 @@ def main():
     metadata['baseline_bin_stride'] = [BIN_STRIDE_X, BIN_STRIDE_Y, BIN_STRIDE_Z]
     metadata['baseline_gaussian_sigma'] = GAUSSIAN_SIGMA
     metadata['num_cells'] = num_cells
-
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+    save_metadata(args.zarr, metadata)
 
     print(f"\nDone. Added baseline_F0, baseline_A_hat, baseline_A_hat_grid, cell_activity to {args.zarr}", flush=True)
 
