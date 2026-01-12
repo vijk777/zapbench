@@ -126,9 +126,9 @@ def create_output_zarr(output_path: str, num_pixels: int, num_cells: int, batch_
         dtype='int16',
     )
 
-    print(f"  Creating acquisition_time [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
-    arrays['acquisition_time'] = create_array(
-        output_path, 'acquisition_time',
+    print(f"  Creating acquisition_time_ms [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)
+    arrays['acquisition_time_ms'] = create_array(
+        output_path, 'acquisition_time_ms',
         shape=(num_pixels, SIZE_T),
         chunks=(pixel_chunk, batch_size),
         dtype='uint32',

@@ -136,7 +136,7 @@ def fit_smooth_spatial_field(F0: np.ndarray, aligned_coords: np.ndarray, volume_
 
 def aggregate_cell_data(
     raw_values,
-    acquisition_time,
+    acquisition_time_ms,
     A_hat: np.ndarray,
     cell_boundaries: np.ndarray,
     pixels_per_cell: np.ndarray,
@@ -164,7 +164,7 @@ def aggregate_cell_data(
 
         # Load time chunks
         F = raw_values[:, t_start:t_end].read().result().astype(np.float32)
-        acq = acquisition_time[:, t_start:t_end].read().result().astype(np.float64)
+        acq = acquisition_time_ms[:, t_start:t_end].read().result().astype(np.float64)
 
         # Compute corrected activity: S = max(0, F - A_hat)
         S = np.maximum(0, F - A_hat[:, np.newaxis])
@@ -194,7 +194,7 @@ def main():
     # Open input arrays
     print("Opening input arrays...", flush=True)
     raw_values = open_array(args.zarr, 'raw_values')
-    acquisition_time = open_array(args.zarr, 'acquisition_time')
+    acquisition_time_ms = open_array(args.zarr, 'acquisition_time_ms')
     cell_ids = open_array(args.zarr, 'cell_ids').read().result()
     aligned_coords = open_array(args.zarr, 'aligned_coords').read().result()
 
@@ -215,7 +215,7 @@ def main():
     print("\nStep 3: Computing cell activity and acquisition times...", flush=True)
     cell_boundaries, pixels_per_cell = compute_cell_boundaries(cell_ids, num_cells)
     cell_activity, cell_acquisition_ms = aggregate_cell_data(
-        raw_values, acquisition_time, A_hat,
+        raw_values, acquisition_time_ms, A_hat,
         cell_boundaries, pixels_per_cell.astype(np.float32),
         num_cells, num_timesteps, TIME_CHUNK_SIZE
     )

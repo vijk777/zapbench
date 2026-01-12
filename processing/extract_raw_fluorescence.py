@@ -107,7 +107,7 @@ def main():
     print("Opening output arrays...", flush=True)
     out_raw_values = open_array(args.output_zarr, 'raw_values')
     out_raw_z = open_array(args.output_zarr, 'raw_z')
-    out_acq_time = open_array(args.output_zarr, 'acquisition_time')
+    out_acq_time = open_array(args.output_zarr, 'acquisition_time_ms')
 
     # Load precomputed coordinates
     print("Loading precomputed coordinates...", flush=True)

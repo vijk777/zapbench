@@ -280,20 +280,20 @@ class EndToEndTest(absltest.TestCase):
 
         # Step 2: Extract raw values
         raw_values = np.zeros((num_pixels, TEST_SIZE_T), dtype=np.uint16)
-        acquisition_time = np.zeros((num_pixels, TEST_SIZE_T), dtype=np.uint32)
+        acquisition_time_ms = np.zeros((num_pixels, TEST_SIZE_T), dtype=np.uint32)
 
         for t in range(TEST_SIZE_T):
             raw_values[:, t] = raw_data[xi, yi, zi, t]
-            acquisition_time[:, t] = t * 914 + zi * 12
+            acquisition_time_ms[:, t] = t * 914 + zi * 12
 
         create_array(output_zarr, 'raw_values', (num_pixels, TEST_SIZE_T), (num_pixels, TEST_SIZE_T), 'uint16').write(raw_values).result()
-        create_array(output_zarr, 'acquisition_time', (num_pixels, TEST_SIZE_T), (num_pixels, TEST_SIZE_T), 'uint32').write(acquisition_time).result()
+        create_array(output_zarr, 'acquisition_time_ms', (num_pixels, TEST_SIZE_T), (num_pixels, TEST_SIZE_T), 'uint32').write(acquisition_time_ms).result()
 
         save_metadata(output_zarr, {'num_pixels': num_pixels, 'num_timesteps': TEST_SIZE_T})
 
         # Step 3: Compute cell activity
         raw_values_arr = open_array(output_zarr, 'raw_values')
-        acq_time_arr = open_array(output_zarr, 'acquisition_time')
+        acq_time_arr = open_array(output_zarr, 'acquisition_time_ms')
 
         F0 = compute_percentile_chunked(raw_values_arr, percentile=10, chunk_size=100)
         self.assertEqual(len(F0), num_pixels)
@@ -351,10 +351,10 @@ class EndToEndTest(absltest.TestCase):
         A_hat = np.full(num_pixels, 50.0, dtype=np.float32)
 
         create_array(output_zarr, 'raw_values', (num_pixels, num_timesteps), (num_pixels, num_timesteps), 'uint16').write(raw_values_data).result()
-        create_array(output_zarr, 'acquisition_time', (num_pixels, num_timesteps), (num_pixels, num_timesteps), 'uint32').write(acq_time_data).result()
+        create_array(output_zarr, 'acquisition_time_ms', (num_pixels, num_timesteps), (num_pixels, num_timesteps), 'uint32').write(acq_time_data).result()
 
         raw_values_arr = open_array(output_zarr, 'raw_values')
-        acq_time_arr = open_array(output_zarr, 'acquisition_time')
+        acq_time_arr = open_array(output_zarr, 'acquisition_time_ms')
 
         cell_boundaries, pixels_per_cell = compute_cell_boundaries(cell_ids, num_cells)
 
