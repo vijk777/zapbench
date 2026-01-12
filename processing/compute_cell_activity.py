@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
 """Compute background-corrected cell activity from raw fluorescence data.
 
-Pipeline:
-1. Compute F0 (8th percentile) per pixel over time
-2. Compute corrected activity S = max(0, F - F0) and aggregate per cell
-3. Compute normalized activity (F - F0) / F0 and aggregate per cell
-4. Aggregate acquisition timestamps per cell
-
-Adds the following arrays to the existing zarr:
-- baseline_F0: [num_pixels] - 8th percentile per pixel
-- cell_activity: [num_cells, num_timesteps] - mean corrected activity per cell
-- cell_activity_normalized: [num_cells, num_timesteps] - mean normalized activity (dF/F0) per cell
-- cell_acquisition_ms: [num_cells, num_timesteps] - mean acquisition time per cell
+Computes F0 (8th percentile per pixel), then aggregates (F - F0) and (F - F0) / F0 per cell.
 
 Usage:
-    python compute_cell_activity.py --zarr /path/to/output.zarr
+    python processing/compute_cell_activity.py --zarr output.zarr
 """
 
 import argparse

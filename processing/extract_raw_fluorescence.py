@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """Extract raw fluorescence values for a batch of timesteps.
 
-Reads precomputed coordinates from the initialized zarr and extracts raw fluorescence
-values for a contiguous range of timesteps. Designed to run as parallel jobs on a cluster.
+Applies motion correction via cubic spline interpolation of flow fields, then samples
+raw fluorescence at corrected coordinates. Designed for parallel cluster jobs.
 
 Usage:
-    python extract_raw_fluorescence.py --start-t 0 --end-t 100 --output-zarr /path/to/output.zarr
-
-    # Submit as cluster jobs:
-    for start_t in $(seq 0 100 7878); do
-        end_t=$((start_t + 100))
-        if [ $end_t -gt 7879 ]; then end_t=7879; fi
-        bsub -J "extract_t${start_t}" -n 1 -o "logs/t${start_t}.log" -e "logs/t${start_t}.err" \
-            python extract_raw_fluorescence.py --start-t $start_t --end-t $end_t \
-            --output-zarr /path/to/output.zarr
-    done
+    python processing/extract_raw_fluorescence.py --start-t 0 --end-t 100 --output-zarr output.zarr
 """
 
 import argparse

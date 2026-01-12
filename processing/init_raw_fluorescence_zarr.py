@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 """Initialize zarr for raw fluorescence extraction.
 
-Creates the output zarr structure and writes static arrays (cell_ids, aligned_coords,
-grid_coords). Must be run once before submitting batch extraction jobs.
+Creates output zarr structure and writes static arrays from segmentation.
+Must be run once before submitting batch extraction jobs.
 
 Usage:
-    python init_raw_fluorescence_zarr.py --output-zarr /path/to/output.zarr
-
-    # With custom source:
-    python init_raw_fluorescence_zarr.py --output-zarr /path/to/output.zarr \
-        --gs-uri gs://zapbench-release/volumes/20240930
-
-    # With custom batch size (affects chunking):
-    python init_raw_fluorescence_zarr.py --output-zarr /path/to/output.zarr --batch-size 100
+    python processing/init_raw_fluorescence_zarr.py --output-zarr output.zarr
 """
 
 import argparse
