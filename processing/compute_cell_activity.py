@@ -5,12 +5,14 @@ Pipeline:
 1. Compute F0 (10th percentile) per pixel over time
 2. Fit smooth spatial field A_hat via binning and Gaussian smoothing
 3. Compute corrected activity S = max(0, F - A_hat) and aggregate per cell
+4. Aggregate acquisition timestamps per cell
 
 Adds the following arrays to the existing zarr:
 - baseline_F0: [num_pixels] - 10th percentile per pixel
 - baseline_A_hat: [num_pixels] - smooth spatial field at each pixel
 - baseline_A_hat_grid: [nx, ny, nz] - binned/smoothed grid for inspection
 - cell_activity: [num_cells, num_timesteps] - mean corrected activity per cell
+- cell_acquisition_ms: [num_cells, num_timesteps] - mean acquisition time per cell
 
 Usage:
     python compute_cell_activity.py --zarr /path/to/output.zarr
@@ -132,21 +134,27 @@ def fit_smooth_spatial_field(F0: np.ndarray, aligned_coords: np.ndarray, volume_
     return A_hat, A_hat_grid
 
 
-def aggregate_cell_activity(
+def aggregate_cell_data(
     raw_values,
+    acquisition_time,
     A_hat: np.ndarray,
     cell_boundaries: np.ndarray,
     pixels_per_cell: np.ndarray,
     num_cells: int,
     num_timesteps: int,
     time_chunk_size: int
-) -> np.ndarray:
-    """Compute corrected activity and aggregate per cell.
+) -> tuple:
+    """Compute corrected activity and acquisition time, aggregated per cell.
 
     Streams through time chunks to avoid loading full array.
+
+    Returns:
+        cell_activity: [num_cells, num_timesteps] - mean corrected activity
+        cell_acquisition_ms: [num_cells, num_timesteps] - mean acquisition time
     """
-    # Output array
+    # Output arrays
     cell_activity = np.zeros((num_cells, num_timesteps), dtype=np.float32)
+    cell_acquisition_ms = np.zeros((num_cells, num_timesteps), dtype=np.uint32)
 
     num_chunks = (num_timesteps + time_chunk_size - 1) // time_chunk_size
 
@@ -154,17 +162,23 @@ def aggregate_cell_activity(
         t_end = min(t_start + time_chunk_size, num_timesteps)
         print(f"  Processing timesteps [{t_start}, {t_end}) ({i+1}/{num_chunks})", flush=True)
 
-        # Load time chunk
+        # Load time chunks
         F = raw_values[:, t_start:t_end].read().result().astype(np.float32)
+        acq = acquisition_time[:, t_start:t_end].read().result().astype(np.float64)
 
         # Compute corrected activity: S = max(0, F - A_hat)
         S = np.maximum(0, F - A_hat[:, np.newaxis])
 
         # Aggregate per cell using reduceat
-        cell_sums = np.add.reduceat(S, cell_boundaries[:-1], axis=0)
-        cell_activity[:, t_start:t_end] = cell_sums / pixels_per_cell[:, np.newaxis]
+        activity_sums = np.add.reduceat(S, cell_boundaries[:-1], axis=0)
+        cell_activity[:, t_start:t_end] = activity_sums / pixels_per_cell[:, np.newaxis]
 
-    return cell_activity
+        acq_sums = np.add.reduceat(acq, cell_boundaries[:-1], axis=0)
+        cell_acquisition_ms[:, t_start:t_end] = np.round(
+            acq_sums / pixels_per_cell[:, np.newaxis]
+        ).astype(np.uint32)
+
+    return cell_activity, cell_acquisition_ms
 
 
 def main():
@@ -180,6 +194,7 @@ def main():
     # Open input arrays
     print("Opening input arrays...", flush=True)
     raw_values = open_array(args.zarr, 'raw_values')
+    acquisition_time = open_array(args.zarr, 'acquisition_time')
     cell_ids = open_array(args.zarr, 'cell_ids').read().result()
     aligned_coords = open_array(args.zarr, 'aligned_coords').read().result()
 
@@ -196,14 +211,16 @@ def main():
     A_hat, A_hat_grid = fit_smooth_spatial_field(F0, aligned_coords, VOLUME_SHAPE)
     print(f"  A_hat range: [{A_hat.min():.1f}, {A_hat.max():.1f}]", flush=True)
 
-    # Step 3: Compute corrected activity and aggregate per cell
-    print("\nStep 3: Computing cell activity...", flush=True)
+    # Step 3: Compute corrected activity and acquisition time, aggregate per cell
+    print("\nStep 3: Computing cell activity and acquisition times...", flush=True)
     cell_boundaries, pixels_per_cell = compute_cell_boundaries(cell_ids, num_cells)
-    cell_activity = aggregate_cell_activity(
-        raw_values, A_hat, cell_boundaries, pixels_per_cell.astype(np.float32),
+    cell_activity, cell_acquisition_ms = aggregate_cell_data(
+        raw_values, acquisition_time, A_hat,
+        cell_boundaries, pixels_per_cell.astype(np.float32),
         num_cells, num_timesteps, TIME_CHUNK_SIZE
     )
     print(f"  cell_activity range: [{cell_activity.min():.1f}, {cell_activity.max():.1f}]", flush=True)
+    print(f"  cell_acquisition_ms range: [{cell_acquisition_ms.min()}, {cell_acquisition_ms.max()}] ms", flush=True)
 
     # Write outputs to existing zarr
     print("\nWriting outputs...", flush=True)
@@ -236,6 +253,14 @@ def main():
     )
     cell_activity_arr.write(cell_activity).result()
 
+    # cell_acquisition_ms
+    print("  Writing cell_acquisition_ms...", flush=True)
+    cell_acq_arr = create_array(
+        args.zarr, 'cell_acquisition_ms',
+        (num_cells, num_timesteps), (num_cells, 100), 'uint32'
+    )
+    cell_acq_arr.write(cell_acquisition_ms).result()
+
     # Update metadata
     metadata['baseline_percentile'] = PERCENTILE
     metadata['baseline_bin_stride'] = [BIN_STRIDE_X, BIN_STRIDE_Y, BIN_STRIDE_Z]
@@ -243,7 +268,7 @@ def main():
     metadata['num_cells'] = num_cells
     save_metadata(args.zarr, metadata)
 
-    print(f"\nDone. Added baseline_F0, baseline_A_hat, baseline_A_hat_grid, cell_activity to {args.zarr}", flush=True)
+    print(f"\nDone. Added baseline_F0, baseline_A_hat, baseline_A_hat_grid, cell_activity, cell_acquisition_ms to {args.zarr}", flush=True)
 
 
 if __name__ == "__main__":
