@@ -210,14 +210,43 @@ class EndToEndTest(absltest.TestCase):
         import init_raw_fluorescence_zarr as init_script
 
         segmentation = make_synthetic_segmentation()
-        xi, yi, zi, gx, gy, gz, cell_ids = init_script.extract_and_sort_coordinates(segmentation)
+        xi, yi, zi, gx, gy, gz, cell_ids, num_cells = init_script.extract_and_sort_coordinates(segmentation)
 
         num_pixels = len(xi)
         self.assertEqual(num_pixels, TEST_NUM_CELLS * 8)  # 5 cells * 2^3 pixels each
+        self.assertEqual(num_cells, TEST_NUM_CELLS)
         self.assertEqual(cell_ids.max(), TEST_NUM_CELLS - 1)  # 0-indexed
 
         # Verify sorted by cell_id
         self.assertTrue(np.all(np.diff(cell_ids) >= 0))
+
+    def test_cell_pixel_boundaries(self):
+        """Test that cell_pixel_boundaries correctly indexes into pixel arrays."""
+        import init_raw_fluorescence_zarr as init_script
+
+        segmentation = make_synthetic_segmentation()
+        xi, yi, zi, gx, gy, gz, cell_ids, num_cells = init_script.extract_and_sort_coordinates(segmentation)
+        num_pixels = len(xi)
+
+        # Compute boundaries as the script does
+        cell_pixel_boundaries = np.searchsorted(cell_ids, np.arange(num_cells + 1))
+
+        # Verify shape
+        self.assertEqual(len(cell_pixel_boundaries), num_cells + 1)
+        self.assertEqual(cell_pixel_boundaries[0], 0)
+        self.assertEqual(cell_pixel_boundaries[-1], num_pixels)
+
+        # Verify each cell's pixels have correct cell_id
+        for cell_id in range(num_cells):
+            start = cell_pixel_boundaries[cell_id]
+            end = cell_pixel_boundaries[cell_id + 1]
+            cell_pixel_ids = cell_ids[start:end]
+
+            # All pixels in this range should belong to this cell
+            self.assertTrue(np.all(cell_pixel_ids == cell_id))
+
+            # Each cell has 8 pixels (2x2x2 cube)
+            self.assertEqual(end - start, 8)
 
     def test_full_pipeline(self):
         import init_raw_fluorescence_zarr as init_script
@@ -234,15 +263,20 @@ class EndToEndTest(absltest.TestCase):
         raw_data = make_synthetic_raw_data()
 
         # Step 1: Initialize
-        xi, yi, zi, gx, gy, gz, cell_ids = init_script.extract_and_sort_coordinates(segmentation)
+        xi, yi, zi, gx, gy, gz, cell_ids, num_cells = init_script.extract_and_sort_coordinates(segmentation)
         num_pixels = len(xi)
 
         self.assertEqual(num_pixels, TEST_NUM_CELLS * 8)
+        self.assertEqual(num_cells, TEST_NUM_CELLS)
 
         create_array(output_zarr, 'cell_ids', (num_pixels,), (num_pixels,), 'uint64').write(cell_ids).result()
 
         aligned_coords = np.stack([xi, yi, zi], axis=1)
         create_array(output_zarr, 'aligned_coords', (num_pixels, 3), (num_pixels, 3), 'int32').write(aligned_coords).result()
+
+        # Write cell_pixel_boundaries
+        cell_pixel_boundaries = np.searchsorted(cell_ids, np.arange(num_cells + 1)).astype(np.uint64)
+        create_array(output_zarr, 'cell_pixel_boundaries', (num_cells + 1,), (num_cells + 1,), 'uint64').write(cell_pixel_boundaries).result()
 
         # Step 2: Extract raw values
         raw_values = np.zeros((num_pixels, TEST_SIZE_T), dtype=np.uint16)

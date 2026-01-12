@@ -75,13 +75,14 @@ def extract_and_sort_coordinates(segmentation: np.ndarray):
         xi, yi, zi: Aligned coordinates (sorted by cell_id)
         gx, gy, gz: Flow field grid coordinates (sorted by cell_id)
         cell_ids: Cell IDs (sorted, 0-indexed)
+        num_cells: Number of cells
     """
     print("Extracting labeled voxel coordinates...", flush=True)
     xi, yi, zi = np.where(segmentation > 0)
     cell_ids = segmentation[xi, yi, zi].astype(np.uint64) - 1  # 0-indexed
 
     num_pixels = len(xi)
-    num_cells = cell_ids.max() + 1
+    num_cells = int(cell_ids.max() + 1)
     print(f"  Found {num_pixels:,} labeled pixels across {num_cells:,} cells", flush=True)
 
     print("Sorting by cell ID for contiguous grouping...", flush=True)
@@ -96,10 +97,10 @@ def extract_and_sort_coordinates(segmentation: np.ndarray):
     gy = (yi // STRIDE_Y).astype(np.int32)
     gz = (zi // STRIDE_Z).astype(np.int32)
 
-    return xi, yi, zi, gx, gy, gz, cell_ids
+    return xi, yi, zi, gx, gy, gz, cell_ids, num_cells
 
 
-def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
+def create_output_zarr(output_path: str, num_pixels: int, num_cells: int, batch_size: int):
     """Create output zarr with proper structure and chunking."""
     print(f"Creating output zarr at {output_path}...", flush=True)
     os.makedirs(output_path, exist_ok=True)
@@ -158,15 +159,25 @@ def create_output_zarr(output_path: str, num_pixels: int, batch_size: int):
         dtype='int32',
     )
 
+    # Cell index for efficient per-cell access
+    print(f"  Creating cell_pixel_boundaries [{num_cells + 1}]", flush=True)
+    arrays['cell_pixel_boundaries'] = create_array(
+        output_path, 'cell_pixel_boundaries',
+        shape=(num_cells + 1,),
+        chunks=(num_cells + 1,),
+        dtype='uint64',
+    )
+
     return arrays
 
 
-def write_metadata(output_path: str, gs_uri: str, batch_size: int, num_pixels: int, pixel_chunk: int):
+def write_metadata(output_path: str, gs_uri: str, batch_size: int, num_pixels: int, num_cells: int, pixel_chunk: int):
     """Write metadata JSON file."""
     metadata = {
         'gs_uri': gs_uri,
         'batch_size': batch_size,
         'num_pixels': num_pixels,
+        'num_cells': num_cells,
         'num_timesteps': SIZE_T,
         'pixel_chunk_size': pixel_chunk,
         'stride_x': STRIDE_X,
@@ -179,7 +190,7 @@ def write_metadata(output_path: str, gs_uri: str, batch_size: int, num_pixels: i
     print(f"  Wrote metadata to {metadata_path}", flush=True)
 
 
-def write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids):
+def write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids, num_cells):
     """Write static arrays to zarr."""
     print("Writing static arrays...", flush=True)
 
@@ -194,6 +205,11 @@ def write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids):
     grid_coords = np.stack([gx, gy, gz], axis=1)
     arrays['grid_coords'].write(grid_coords).result()
 
+    print("  Writing cell_pixel_boundaries...", flush=True)
+    # Compute boundaries: cell i spans pixels[boundaries[i]:boundaries[i+1]]
+    cell_pixel_boundaries = np.searchsorted(cell_ids, np.arange(num_cells + 1)).astype(np.uint64)
+    arrays['cell_pixel_boundaries'].write(cell_pixel_boundaries).result()
+
     print("Static arrays written successfully.", flush=True)
 
 
@@ -204,21 +220,21 @@ def main():
     segmentation = load_segmentation(args.gs_uri)
 
     # Extract and sort coordinates
-    xi, yi, zi, gx, gy, gz, cell_ids = extract_and_sort_coordinates(segmentation)
+    xi, yi, zi, gx, gy, gz, cell_ids, num_cells = extract_and_sort_coordinates(segmentation)
     num_pixels = len(xi)
 
     # Create output zarr
-    arrays = create_output_zarr(args.output_zarr, num_pixels, args.batch_size)
+    arrays = create_output_zarr(args.output_zarr, num_pixels, num_cells, args.batch_size)
     pixel_chunk = min(PIXEL_CHUNK_SIZE, num_pixels)
 
     # Write metadata
-    write_metadata(args.output_zarr, args.gs_uri, args.batch_size, num_pixels, pixel_chunk)
+    write_metadata(args.output_zarr, args.gs_uri, args.batch_size, num_pixels, num_cells, pixel_chunk)
 
     # Write static arrays
-    write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids)
+    write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids, num_cells)
 
     print(f"\nInitialization complete: {args.output_zarr}", flush=True)
-    print(f"  {num_pixels:,} pixels, {SIZE_T} timesteps", flush=True)
+    print(f"  {num_pixels:,} pixels across {num_cells:,} cells, {SIZE_T} timesteps", flush=True)
     print(f"  Batch size: {args.batch_size}", flush=True)
     print(f"\nNext step: Submit batch extraction jobs with:", flush=True)
     print(f"  python extract_raw_fluorescence.py --start-t <start> --end-t <end> --output-zarr {args.output_zarr}", flush=True)
