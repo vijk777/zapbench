@@ -169,30 +169,6 @@ class ComputeCellActivityFunctionsTest(absltest.TestCase):
         expected = np.percentile(data, 10, axis=1).astype(np.float32)
         np.testing.assert_array_almost_equal(F0, expected, decimal=3)
 
-    def test_fit_smooth_spatial_field(self):
-        from compute_cell_activity import fit_smooth_spatial_field, BIN_STRIDE_X, BIN_STRIDE_Y, BIN_STRIDE_Z
-
-        num_pixels = 1000
-        coords = np.random.randint(0, 100, size=(num_pixels, 3), dtype=np.int32)
-        F0 = (100 + coords[:, 2] * 2).astype(np.float32)
-
-        volume_shape = (100, 100, 100)
-
-        A_hat, A_hat_grid = fit_smooth_spatial_field(F0, coords, volume_shape)
-
-        self.assertEqual(len(A_hat), num_pixels)
-
-        expected_grid_shape = (
-            (volume_shape[0] + BIN_STRIDE_X - 1) // BIN_STRIDE_X,
-            (volume_shape[1] + BIN_STRIDE_Y - 1) // BIN_STRIDE_Y,
-            (volume_shape[2] + BIN_STRIDE_Z - 1) // BIN_STRIDE_Z,
-        )
-        self.assertEqual(A_hat_grid.shape, expected_grid_shape)
-
-        # Verify z gradient is preserved
-        low_z_mask = coords[:, 2] < 30
-        high_z_mask = coords[:, 2] > 70
-        self.assertGreater(A_hat[high_z_mask].mean(), A_hat[low_z_mask].mean())
 
 
 class EndToEndTest(absltest.TestCase):
@@ -252,7 +228,6 @@ class EndToEndTest(absltest.TestCase):
         import init_raw_fluorescence_zarr as init_script
         from compute_cell_activity import (
             compute_percentile_chunked,
-            fit_smooth_spatial_field,
             aggregate_cell_data,
         )
 
@@ -295,25 +270,21 @@ class EndToEndTest(absltest.TestCase):
         raw_values_arr = open_array(output_zarr, 'raw_values')
         acq_time_arr = open_array(output_zarr, 'acquisition_time_ms')
 
-        F0 = compute_percentile_chunked(raw_values_arr, percentile=10, chunk_size=100)
+        F0 = compute_percentile_chunked(raw_values_arr, percentile=8, chunk_size=100)
         self.assertEqual(len(F0), num_pixels)
-
-        test_volume_shape = (TEST_SIZE_X, TEST_SIZE_Y, TEST_SIZE_Z)
-        A_hat, A_hat_grid = fit_smooth_spatial_field(F0, aligned_coords, test_volume_shape)
-        self.assertEqual(len(A_hat), num_pixels)
 
         num_cells = int(cell_ids.max()) + 1
         cell_boundaries, pixels_per_cell = compute_cell_boundaries(cell_ids, num_cells)
 
-        cell_activity, cell_acquisition_ms = aggregate_cell_data(
-            raw_values_arr, acq_time_arr, A_hat,
+        cell_activity, cell_activity_normalized, cell_acquisition_ms = aggregate_cell_data(
+            raw_values_arr, acq_time_arr, F0,
             cell_boundaries, pixels_per_cell.astype(np.float32),
             num_cells, TEST_SIZE_T, time_chunk_size=10
         )
 
         self.assertEqual(cell_activity.shape, (TEST_NUM_CELLS, TEST_SIZE_T))
+        self.assertEqual(cell_activity_normalized.shape, (TEST_NUM_CELLS, TEST_SIZE_T))
         self.assertEqual(cell_acquisition_ms.shape, (TEST_NUM_CELLS, TEST_SIZE_T))
-        self.assertGreaterEqual(cell_activity.min(), 0)
 
         # Verify cells with extra signal have higher activity
         self.assertGreater(cell_activity[0, 2], cell_activity[0, 0])
@@ -348,7 +319,7 @@ class EndToEndTest(absltest.TestCase):
         ], dtype=np.uint32)
 
         cell_ids = np.array([0, 0, 0, 1, 1, 1], dtype=np.uint64)
-        A_hat = np.full(num_pixels, 50.0, dtype=np.float32)
+        F0 = np.full(num_pixels, 50.0, dtype=np.float32)
 
         create_array(output_zarr, 'raw_values', (num_pixels, num_timesteps), (num_pixels, num_timesteps), 'uint16').write(raw_values_data).result()
         create_array(output_zarr, 'acquisition_time_ms', (num_pixels, num_timesteps), (num_pixels, num_timesteps), 'uint32').write(acq_time_data).result()
@@ -358,8 +329,8 @@ class EndToEndTest(absltest.TestCase):
 
         cell_boundaries, pixels_per_cell = compute_cell_boundaries(cell_ids, num_cells)
 
-        cell_activity, cell_acquisition_ms = aggregate_cell_data(
-            raw_values_arr, acq_time_arr, A_hat,
+        cell_activity, cell_activity_normalized, cell_acquisition_ms = aggregate_cell_data(
+            raw_values_arr, acq_time_arr, F0,
             cell_boundaries, pixels_per_cell.astype(np.float32),
             num_cells, num_timesteps, time_chunk_size=10
         )
@@ -371,6 +342,14 @@ class EndToEndTest(absltest.TestCase):
         ], dtype=np.float32)
 
         np.testing.assert_array_almost_equal(cell_activity, expected_activity)
+
+        # Expected normalized: mean of ([100,110,120] - 50) / 50 = mean([1.0, 1.2, 1.4]) = 1.2
+        expected_normalized = np.array([
+            [1.2, 1.2, 1.2, 1.2],
+            [3.2, 3.2, 3.2, 3.2],
+        ], dtype=np.float32)
+
+        np.testing.assert_array_almost_equal(cell_activity_normalized, expected_normalized)
 
         # Expected: mean of [0,10,20]=10, [100,110,120]=110, etc.
         expected_acq = np.array([

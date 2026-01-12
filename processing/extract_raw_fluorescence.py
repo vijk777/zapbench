@@ -21,8 +21,9 @@ import argparse
 
 import numpy as np
 import tensorstore as ts
+from scipy.ndimage import map_coordinates
 
-from zarr_utils import load_metadata, open_array
+from zarr_utils import load_metadata, open_array, STRIDE_X, STRIDE_Y, STRIDE_Z
 
 
 # Acquisition timing constants
@@ -112,14 +113,10 @@ def main():
     # Load precomputed coordinates
     print("Loading precomputed coordinates...", flush=True)
     aligned_coords = open_array(args.output_zarr, 'aligned_coords').read().result()
-    grid_coords = open_array(args.output_zarr, 'grid_coords').read().result()
 
     xi = aligned_coords[:, 0]
     yi = aligned_coords[:, 1]
     zi = aligned_coords[:, 2]
-    gx = grid_coords[:, 0]
-    gy = grid_coords[:, 1]
-    gz = grid_coords[:, 2]
 
     # Allocate output buffers
     print("Allocating buffers...", flush=True)
@@ -127,35 +124,35 @@ def main():
     raw_z_batch = np.empty((num_pixels, batch_size), dtype=np.int16)
     acq_time_batch = np.empty((num_pixels, batch_size), dtype=np.uint32)
 
-    # Offset scaling factor
-    offset_scale = np.array([1, 1, 4], dtype=np.float32)
-
     # Process each timestep
     print("Processing timesteps...", flush=True)
     for t_idx, T in enumerate(range(start_t, end_t)):
         print(f"  T={T} ({t_idx + 1}/{batch_size})", flush=True)
 
-        # Read flow field offsets for all pixels at time T
-        # Flow field shape: [3, fz, fy, fx, t]
-        offset = ds_flow[:, gz, gy, gx, T].read().result()
+        # Read flow field slice for this timestep and interpolate
+        # Flow field shape: [3, fz, fy, fx, t] -> slice is [3, fz, fy, fx]
+        flow_t = ds_flow[:, :, :, :, T].read().result()
 
-        # Compute integer offsets (raw space has different z resolution)
-        ioffset = np.round(offset / offset_scale[:, np.newaxis]).astype(np.int32)
+        # Cubic spline interpolation at pixel positions
+        coords = np.array([zi / STRIDE_Z, yi / STRIDE_Y, xi / STRIDE_X])
+        offset = np.stack([map_coordinates(flow_t[c], coords, order=3, mode='nearest') for c in range(3)])
 
-        # Compute raw coordinates
-        raw_x = xi + ioffset[0]
-        raw_y = yi + ioffset[1]
-        raw_z = zi + ioffset[2]
+        # Compute raw coordinates (scale offset for raw space z resolution)
+        raw_coords = np.array([
+            xi + offset[0],
+            yi + offset[1],
+            zi + offset[2] / 4.0,  # raw space has 4x lower z resolution
+        ])
 
         # Read entire raw volume for this timestep
         raw_stack = ds_raw[:, :, :, T].read().result()
 
-        # Sample values at raw coordinates
-        raw_values_batch[:, t_idx] = raw_stack[raw_x, raw_y, raw_z]
-        raw_z_batch[:, t_idx] = raw_z
+        # Sample values at raw coordinates (nearest neighbor)
+        raw_values_batch[:, t_idx] = map_coordinates(raw_stack, raw_coords, order=0, mode='nearest')
+        raw_z_batch[:, t_idx] = np.round(raw_coords[2]).astype(np.int16)
 
         # Compute acquisition time: T * 914ms + raw_z * 12ms
-        acq_time_batch[:, t_idx] = T * MS_PER_TIMESTEP + raw_z * MS_PER_Z
+        acq_time_batch[:, t_idx] = T * MS_PER_TIMESTEP + raw_z_batch[:, t_idx] * MS_PER_Z
 
     # Write batch to output
     print(f"Writing batch to zarr [:, {start_t}:{end_t}]...", flush=True)
