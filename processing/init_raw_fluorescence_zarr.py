@@ -116,7 +116,7 @@ def create_output_zarr(output_path: str, num_pixels: int, num_cells: int, batch_
         output_path, 'raw_z',
         shape=(num_pixels, SIZE_T),
         chunks=(pixel_chunk, batch_size),
-        dtype='int16',
+        dtype='int8',
     )
 
     print(f"  Creating acquisition_time_ms [{num_pixels}, {SIZE_T}], chunks=[{pixel_chunk}, {batch_size}]", flush=True)

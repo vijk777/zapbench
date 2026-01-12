@@ -10,6 +10,7 @@ Usage:
 import argparse
 
 import numpy as np
+np.seterr(all='raise')
 
 from zarr_utils import (
     TIME_CHUNK_SIZE,
@@ -101,14 +102,15 @@ def aggregate_cell_data(
         # Compute normalized activity: (F - F0) / F0
         dF_norm = dF / F0_safe[:, np.newaxis]
 
-        # Aggregate per cell using reduceat
-        activity_sums = np.add.reduceat(dF, cell_boundaries[:-1], axis=0)
+        # Aggregate per cell using reduceat (boundaries must be int64 for reduceat)
+        bounds = cell_boundaries[:-1].astype(np.int64)
+        activity_sums = np.add.reduceat(dF, bounds, axis=0)
         cell_activity[:, t_start:t_end] = activity_sums / pixels_per_cell[:, np.newaxis]
 
-        activity_norm_sums = np.add.reduceat(dF_norm, cell_boundaries[:-1], axis=0)
+        activity_norm_sums = np.add.reduceat(dF_norm, bounds, axis=0)
         cell_activity_normalized[:, t_start:t_end] = activity_norm_sums / pixels_per_cell[:, np.newaxis]
 
-        acq_sums = np.add.reduceat(acq, cell_boundaries[:-1], axis=0)
+        acq_sums = np.add.reduceat(acq, bounds, axis=0)
         cell_acquisition_ms[:, t_start:t_end] = np.round(
             acq_sums / pixels_per_cell[:, np.newaxis]
         ).astype(np.uint32)

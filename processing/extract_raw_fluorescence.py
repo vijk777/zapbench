@@ -11,6 +11,7 @@ Usage:
 import argparse
 
 import numpy as np
+np.seterr(all='raise')
 import tensorstore as ts
 from scipy.ndimage import map_coordinates
 
@@ -112,7 +113,7 @@ def main():
     # Allocate output buffers
     print("Allocating buffers...", flush=True)
     raw_values_batch = np.empty((num_pixels, batch_size), dtype=np.uint16)
-    raw_z_batch = np.empty((num_pixels, batch_size), dtype=np.int16)
+    raw_z_batch = np.empty((num_pixels, batch_size), dtype=np.int8)
     acq_time_batch = np.empty((num_pixels, batch_size), dtype=np.uint32)
 
     # Process each timestep
@@ -140,10 +141,10 @@ def main():
 
         # Sample values at raw coordinates (nearest neighbor)
         raw_values_batch[:, t_idx] = map_coordinates(raw_stack, raw_coords, order=0, mode='nearest')
-        raw_z_batch[:, t_idx] = np.round(raw_coords[2]).astype(np.int16)
+        raw_z_batch[:, t_idx] = np.round(raw_coords[2]).astype(np.int8)
 
         # Compute acquisition time: T * 914ms + raw_z * 12ms
-        acq_time_batch[:, t_idx] = T * MS_PER_TIMESTEP + raw_z_batch[:, t_idx] * MS_PER_Z
+        acq_time_batch[:, t_idx] = T * MS_PER_TIMESTEP + raw_z_batch[:, t_idx].astype(np.int32) * MS_PER_Z
 
     # Write batch to output
     print(f"Writing batch to zarr [:, {start_t}:{end_t}]...", flush=True)
