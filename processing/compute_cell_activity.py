@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Compute background-corrected cell activity from raw fluorescence data.
 
-Computes F0 (8th percentile per pixel), then aggregates (F - F0) and (F - F0) / F0 per cell.
+Computes F0 (8th percentile per pixel with rolling window), applies per-cell median
+smoothing (spatial filtering approximation), then computes (F - F0) and (F - F0) / F0.
+
+Memory-efficient: streams through cell-aligned pixel chunks, writing cell activity
+incrementally. Peak memory is O(pixels_in_chunk × num_timesteps).
 
 Usage:
     python processing/compute_cell_activity.py --zarr output.zarr
@@ -11,6 +15,7 @@ import argparse
 
 import numpy as np
 np.seterr(all='raise')
+from scipy.ndimage import percentile_filter
 
 from zarr_utils import (
     TIME_CHUNK_SIZE,
@@ -25,7 +30,10 @@ set_thread_limits(2)
 
 # Processing parameters
 PERCENTILE = 8
-PIXEL_CHUNK_SIZE = 100_000  # pixels per chunk for percentile computation
+PERCENTILE_WINDOW_RADIUS = 400  # ±400 frames (~6 minutes) for rolling baseline
+CLIP_MIN = -0.25  # Clipping bounds for normalized activity
+CLIP_MAX = 1.5
+TARGET_CELLS_PER_CHUNK = 1000  # Target number of cells per processing chunk
 
 
 def parse_args():
@@ -41,79 +49,107 @@ def parse_args():
     return parser.parse_args()
 
 
-def compute_percentile_chunked(raw_values, percentile: int, chunk_size: int) -> np.ndarray:
-    """Compute percentile over time for each pixel, processing in chunks."""
-    num_pixels = raw_values.shape[0]
-    F0 = np.empty(num_pixels, dtype=np.float32)
+def compute_cell_chunks(cell_boundaries: np.ndarray, target_cells: int) -> list:
+    """Compute cell-aligned chunks for streaming.
 
-    num_chunks = (num_pixels + chunk_size - 1) // chunk_size
+    Returns list of (cell_start, cell_end, pixel_start, pixel_end) tuples.
+    Each chunk contains complete cells only.
+    """
+    num_cells = len(cell_boundaries) - 1
+    chunks = []
 
-    for i, start in enumerate(range(0, num_pixels, chunk_size)):
-        end = min(start + chunk_size, num_pixels)
-        print(f"  Computing percentile for pixels [{start:,}, {end:,}) ({i+1}/{num_chunks})", flush=True)
+    cell_start = 0
+    while cell_start < num_cells:
+        cell_end = min(cell_start + target_cells, num_cells)
+        pixel_start = cell_boundaries[cell_start]
+        pixel_end = cell_boundaries[cell_end]
+        chunks.append((cell_start, cell_end, pixel_start, pixel_end))
+        cell_start = cell_end
 
-        # Load chunk of pixels, all timesteps
-        chunk_data = raw_values[start:end, :].read().result()
-        F0[start:end] = np.percentile(chunk_data, percentile, axis=1).astype(np.float32)
-
-    return F0
+    return chunks
 
 
-def aggregate_cell_data(
+def process_cell_chunk(
     raw_values,
     acquisition_time_ms,
-    F0: np.ndarray,
+    pixel_start: int,
+    pixel_end: int,
+    cell_start: int,
+    cell_end: int,
     cell_boundaries: np.ndarray,
-    pixels_per_cell: np.ndarray,
-    num_cells: int,
-    num_timesteps: int,
-    time_chunk_size: int
+    percentile: int,
+    window_radius: int,
+    clip_min: float,
+    clip_max: float,
 ) -> tuple:
-    """Compute corrected activity and acquisition time, aggregated per cell.
+    """Process a chunk of cells: compute F0, apply per-cell smoothing, aggregate.
 
-    Streams through time chunks to avoid loading full array.
+    Args:
+        raw_values: TensorStore array [num_pixels, num_timesteps]
+        acquisition_time_ms: TensorStore array [num_pixels, num_timesteps]
+        pixel_start, pixel_end: Pixel range for this chunk
+        cell_start, cell_end: Cell range for this chunk
+        cell_boundaries: Full cell boundaries array
+        percentile: Percentile for baseline (e.g., 8)
+        window_radius: Rolling window radius (±frames)
+        clip_min, clip_max: Clipping bounds for normalized activity
 
     Returns:
-        cell_activity: [num_cells, num_timesteps] - mean corrected activity (F - F0)
-        cell_activity_normalized: [num_cells, num_timesteps] - mean normalized activity (F - F0) / F0
-        cell_acquisition_ms: [num_cells, num_timesteps] - mean acquisition time
+        cell_activity: [num_cells_in_chunk, num_timesteps]
+        cell_activity_normalized: [num_cells_in_chunk, num_timesteps]
+        cell_acquisition_ms: [num_cells_in_chunk, num_timesteps]
     """
-    # Output arrays
-    cell_activity = np.zeros((num_cells, num_timesteps), dtype=np.float32)
-    cell_activity_normalized = np.zeros((num_cells, num_timesteps), dtype=np.float32)
-    cell_acquisition_ms = np.zeros((num_cells, num_timesteps), dtype=np.uint32)
+    num_cells_chunk = cell_end - cell_start
+    window_size = 2 * window_radius + 1
 
-    num_chunks = (num_timesteps + time_chunk_size - 1) // time_chunk_size
+    # Load raw values for this pixel chunk (all timesteps)
+    F = raw_values[pixel_start:pixel_end, :].read().result().astype(np.float32)
+    num_timesteps = F.shape[1]
 
-    # Precompute F0 with small epsilon to avoid division by zero
+    # Step 1: Compute rolling percentile F0 for each pixel
+    F0 = percentile_filter(
+        F,
+        percentile=percentile,
+        size=(1, window_size),
+        mode='reflect'
+    )
+
+    # Step 2: Apply per-cell median smoothing to F0
+    # For each cell, replace each pixel's F0 with median F0 across all pixels in cell
+    local_boundaries = cell_boundaries[cell_start:cell_end + 1] - pixel_start
+    for c in range(num_cells_chunk):
+        p_start = local_boundaries[c]
+        p_end = local_boundaries[c + 1]
+        if p_end > p_start:
+            # Compute median F0 across pixels in this cell, for each timestep
+            cell_median_F0 = np.median(F0[p_start:p_end, :], axis=0, keepdims=True)
+            F0[p_start:p_end, :] = cell_median_F0
+
+    # Step 3: Compute dF and dF/F0
     F0_safe = np.maximum(F0, 1.0)
+    dF = F - F0
+    dF_norm = np.clip(dF / F0_safe, clip_min, clip_max)
 
-    for i, t_start in enumerate(range(0, num_timesteps, time_chunk_size)):
-        t_end = min(t_start + time_chunk_size, num_timesteps)
-        print(f"  Processing timesteps [{t_start}, {t_end}) ({i+1}/{num_chunks})", flush=True)
+    # Step 4: Aggregate to cells
+    cell_activity = np.empty((num_cells_chunk, num_timesteps), dtype=np.float32)
+    cell_activity_normalized = np.empty((num_cells_chunk, num_timesteps), dtype=np.float32)
+    cell_acquisition_ms = np.empty((num_cells_chunk, num_timesteps), dtype=np.uint32)
 
-        # Load time chunks
-        F = raw_values[:, t_start:t_end].read().result().astype(np.float32)
-        acq = acquisition_time_ms[:, t_start:t_end].read().result().astype(np.float64)
+    # Load acquisition times
+    acq = acquisition_time_ms[pixel_start:pixel_end, :].read().result().astype(np.float64)
 
-        # Compute corrected activity: S = F - F0
-        dF = F - F0[:, np.newaxis]
-
-        # Compute normalized activity: (F - F0) / F0
-        dF_norm = dF / F0_safe[:, np.newaxis]
-
-        # Aggregate per cell using reduceat (boundaries must be int64 for reduceat)
-        bounds = cell_boundaries[:-1].astype(np.int64)
-        activity_sums = np.add.reduceat(dF, bounds, axis=0)
-        cell_activity[:, t_start:t_end] = activity_sums / pixels_per_cell[:, np.newaxis]
-
-        activity_norm_sums = np.add.reduceat(dF_norm, bounds, axis=0)
-        cell_activity_normalized[:, t_start:t_end] = activity_norm_sums / pixels_per_cell[:, np.newaxis]
-
-        acq_sums = np.add.reduceat(acq, bounds, axis=0)
-        cell_acquisition_ms[:, t_start:t_end] = np.round(
-            acq_sums / pixels_per_cell[:, np.newaxis]
-        ).astype(np.uint32)
+    for c in range(num_cells_chunk):
+        p_start = local_boundaries[c]
+        p_end = local_boundaries[c + 1]
+        num_pixels = p_end - p_start
+        if num_pixels > 0:
+            cell_activity[c, :] = dF[p_start:p_end, :].mean(axis=0)
+            cell_activity_normalized[c, :] = dF_norm[p_start:p_end, :].mean(axis=0)
+            cell_acquisition_ms[c, :] = np.round(acq[p_start:p_end, :].mean(axis=0)).astype(np.uint32)
+        else:
+            cell_activity[c, :] = 0
+            cell_activity_normalized[c, :] = 0
+            cell_acquisition_ms[c, :] = 0
 
     return cell_activity, cell_activity_normalized, cell_acquisition_ms
 
@@ -126,75 +162,64 @@ def main():
     # Load metadata
     metadata = load_metadata(args.zarr)
     num_timesteps = metadata['num_timesteps']
-    print(f"Data: {metadata['num_pixels']:,} pixels, {num_timesteps} timesteps", flush=True)
+    num_pixels = metadata['num_pixels']
+    num_cells = metadata['num_cells']
+    print(f"Data: {num_pixels:,} pixels, {num_timesteps} timesteps, {num_cells:,} cells", flush=True)
 
     # Open input arrays
     print("Opening input arrays...", flush=True)
     raw_values = open_array(args.zarr, 'raw_values')
     acquisition_time_ms = open_array(args.zarr, 'acquisition_time_ms')
-
-    num_cells = metadata['num_cells']
-    print(f"Cells: {num_cells:,}", flush=True)
-
-    # Step 1: Compute F0 (8th percentile per pixel)
-    print(f"\nStep 1: Computing F0 ({PERCENTILE}th percentile)...", flush=True)
-    F0 = compute_percentile_chunked(raw_values, PERCENTILE, PIXEL_CHUNK_SIZE)
-    print(f"  F0 range: [{F0.min():.1f}, {F0.max():.1f}]", flush=True)
-
-    # Step 2: Compute corrected activity and acquisition time, aggregate per cell
-    print("\nStep 2: Computing cell activity and acquisition times...", flush=True)
     cell_boundaries = open_array(args.zarr, 'cell_pixel_boundaries').read().result()
-    pixels_per_cell = np.diff(cell_boundaries).astype(np.float32)
-    pixels_per_cell = np.maximum(pixels_per_cell, 1.0)  # Avoid division by zero for empty cells
-    cell_activity, cell_activity_normalized, cell_acquisition_ms = aggregate_cell_data(
-        raw_values, acquisition_time_ms, F0,
-        cell_boundaries, pixels_per_cell,
-        num_cells, num_timesteps, TIME_CHUNK_SIZE
-    )
-    print(f"  cell_activity range: [{cell_activity.min():.1f}, {cell_activity.max():.1f}]", flush=True)
-    print(f"  cell_activity_normalized range: [{cell_activity_normalized.min():.3f}, {cell_activity_normalized.max():.3f}]", flush=True)
-    print(f"  cell_acquisition_ms range: [{cell_acquisition_ms.min()}, {cell_acquisition_ms.max()}] ms", flush=True)
 
-    # Write outputs to existing zarr
-    print("\nWriting outputs...", flush=True)
+    # Compute cell-aligned chunks
+    chunks = compute_cell_chunks(cell_boundaries, TARGET_CELLS_PER_CHUNK)
+    print(f"Processing {len(chunks)} cell-aligned chunks (~{TARGET_CELLS_PER_CHUNK} cells each)", flush=True)
 
-    num_pixels = len(F0)
-
-    # baseline_F0
-    print("  Writing baseline_F0...", flush=True)
-    F0_arr = create_array(args.zarr, 'baseline_F0', (num_pixels,), (num_pixels,), 'float32')
-    F0_arr.write(F0).result()
-
-    # cell_activity
-    print("  Writing cell_activity...", flush=True)
+    # Create output arrays
+    print("Creating output arrays...", flush=True)
     cell_activity_arr = create_array(
         args.zarr, 'cell_activity',
-        (num_cells, num_timesteps), (num_cells, 100), 'float32'
+        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'float32'
     )
-    cell_activity_arr.write(cell_activity).result()
-
-    # cell_activity_normalized
-    print("  Writing cell_activity_normalized...", flush=True)
     cell_activity_norm_arr = create_array(
         args.zarr, 'cell_activity_normalized',
-        (num_cells, num_timesteps), (num_cells, 100), 'float32'
+        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'float32'
     )
-    cell_activity_norm_arr.write(cell_activity_normalized).result()
-
-    # cell_acquisition_ms
-    print("  Writing cell_acquisition_ms...", flush=True)
     cell_acq_arr = create_array(
         args.zarr, 'cell_acquisition_ms',
-        (num_cells, num_timesteps), (num_cells, 100), 'uint32'
+        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'uint32'
     )
-    cell_acq_arr.write(cell_acquisition_ms).result()
+
+    # Process each chunk
+    print(f"\nProcessing cells (F0: {PERCENTILE}th percentile, ±{PERCENTILE_WINDOW_RADIUS} frames)...", flush=True)
+    for i, (cell_start, cell_end, pixel_start, pixel_end) in enumerate(chunks):
+        num_pixels_chunk = pixel_end - pixel_start
+        print(f"  Chunk {i+1}/{len(chunks)}: cells [{cell_start}, {cell_end}), "
+              f"pixels [{pixel_start}, {pixel_end}) ({num_pixels_chunk:,} pixels)", flush=True)
+
+        cell_activity, cell_activity_normalized, cell_acquisition_ms = process_cell_chunk(
+            raw_values, acquisition_time_ms,
+            pixel_start, pixel_end,
+            cell_start, cell_end,
+            cell_boundaries,
+            PERCENTILE, PERCENTILE_WINDOW_RADIUS,
+            CLIP_MIN, CLIP_MAX,
+        )
+
+        # Write chunk results immediately
+        cell_activity_arr[cell_start:cell_end, :].write(cell_activity).result()
+        cell_activity_norm_arr[cell_start:cell_end, :].write(cell_activity_normalized).result()
+        cell_acq_arr[cell_start:cell_end, :].write(cell_acquisition_ms).result()
 
     # Update metadata
     metadata['baseline_percentile'] = PERCENTILE
-    metadata['num_cells'] = num_cells
+    metadata['baseline_window_radius'] = PERCENTILE_WINDOW_RADIUS
+    metadata['spatial_smoothing'] = 'per_cell_median'
+    metadata['normalized_clip_range'] = [CLIP_MIN, CLIP_MAX]
     save_metadata(args.zarr, metadata)
 
-    print(f"\nDone. Added baseline_F0, cell_activity, cell_activity_normalized, cell_acquisition_ms to {args.zarr}", flush=True)
+    print(f"\nDone. Wrote cell_activity, cell_activity_normalized, cell_acquisition_ms to {args.zarr}", flush=True)
 
 
 if __name__ == "__main__":
