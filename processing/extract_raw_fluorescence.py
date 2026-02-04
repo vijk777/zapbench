@@ -116,7 +116,7 @@ def main():
     print("Allocating buffers...", flush=True)
     raw_values_batch = np.empty((num_pixels, batch_size), dtype=np.uint16)
     raw_z_batch = np.empty((num_pixels, batch_size), dtype=np.int8)
-    acq_time_batch = np.empty((num_pixels, batch_size), dtype=np.uint32)
+    acq_time_batch = np.empty((num_pixels, batch_size), dtype=np.uint16)
 
     # Process each timestep
     print("Processing timesteps...", flush=True)
