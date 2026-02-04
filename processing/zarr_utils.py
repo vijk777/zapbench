@@ -26,6 +26,13 @@ PIXEL_CHUNK_SIZE = 1_000_000
 # Default time chunk size for streaming operations
 TIME_CHUNK_SIZE = 100
 
+# Cell activity processing parameters
+CELL_ACTIVITY_CELLS_PER_CHUNK = 1000
+CELL_ACTIVITY_PERCENTILE = 8
+CELL_ACTIVITY_WINDOW_RADIUS = 400  # ±400 frames (~6 minutes) for rolling baseline
+CELL_ACTIVITY_CLIP_MIN = -0.25
+CELL_ACTIVITY_CLIP_MAX = 1.5
+
 
 def set_thread_limits(n_threads: int = 2) -> None:
     """Set environment variables to limit thread usage on cluster."""

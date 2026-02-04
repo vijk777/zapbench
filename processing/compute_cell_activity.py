@@ -18,22 +18,17 @@ np.seterr(all='raise')
 from scipy.ndimage import percentile_filter
 
 from zarr_utils import (
-    TIME_CHUNK_SIZE,
+    CELL_ACTIVITY_CELLS_PER_CHUNK as TARGET_CELLS_PER_CHUNK,
+    CELL_ACTIVITY_PERCENTILE as PERCENTILE,
+    CELL_ACTIVITY_WINDOW_RADIUS as PERCENTILE_WINDOW_RADIUS,
+    CELL_ACTIVITY_CLIP_MIN as CLIP_MIN,
+    CELL_ACTIVITY_CLIP_MAX as CLIP_MAX,
     set_thread_limits,
     open_array,
-    create_array,
     load_metadata,
-    save_metadata,
 )
 
 set_thread_limits(2)
-
-# Processing parameters
-PERCENTILE = 8
-PERCENTILE_WINDOW_RADIUS = 400  # ±400 frames (~6 minutes) for rolling baseline
-CLIP_MIN = -0.25  # Clipping bounds for normalized activity
-CLIP_MAX = 1.5
-TARGET_CELLS_PER_CHUNK = 1000  # Target number of cells per processing chunk
 
 
 def parse_args():
@@ -45,6 +40,18 @@ def parse_args():
         type=str,
         required=True,
         help="Path to zarr with raw_values, cell_ids, aligned_coords",
+    )
+    parser.add_argument(
+        "--cell-start",
+        type=int,
+        default=None,
+        help="First cell index to process (inclusive). Defaults to 0.",
+    )
+    parser.add_argument(
+        "--cell-end",
+        type=int,
+        default=None,
+        help="Last cell index to process (exclusive). Defaults to num_cells.",
     )
     return parser.parse_args()
 
@@ -166,60 +173,54 @@ def main():
     num_cells = metadata['num_cells']
     print(f"Data: {num_pixels:,} pixels, {num_timesteps} timesteps, {num_cells:,} cells", flush=True)
 
+    cell_start = args.cell_start if args.cell_start is not None else 0
+    cell_end = args.cell_end if args.cell_end is not None else num_cells
+    print(f"Processing cells [{cell_start}, {cell_end})", flush=True)
+
     # Open input arrays
     print("Opening input arrays...", flush=True)
     raw_values = open_array(args.zarr, 'raw_values')
     acquisition_time_ms = open_array(args.zarr, 'acquisition_time_ms')
     cell_boundaries = open_array(args.zarr, 'cell_pixel_boundaries').read().result()
 
-    # Compute cell-aligned chunks
-    chunks = compute_cell_chunks(cell_boundaries, TARGET_CELLS_PER_CHUNK)
-    print(f"Processing {len(chunks)} cell-aligned chunks (~{TARGET_CELLS_PER_CHUNK} cells each)", flush=True)
+    # Open output arrays (must be created by init_cell_activity_arrays first)
+    cell_activity_arr = open_array(args.zarr, 'cell_activity')
+    cell_activity_norm_arr = open_array(args.zarr, 'cell_activity_normalized')
+    cell_acq_arr = open_array(args.zarr, 'cell_acquisition_ms')
 
-    # Create output arrays
-    print("Creating output arrays...", flush=True)
-    cell_activity_arr = create_array(
-        args.zarr, 'cell_activity',
-        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'float32'
-    )
-    cell_activity_norm_arr = create_array(
-        args.zarr, 'cell_activity_normalized',
-        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'float32'
-    )
-    cell_acq_arr = create_array(
-        args.zarr, 'cell_acquisition_ms',
-        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'uint16'
-    )
+    # Compute cell-aligned chunks for the requested range
+    sub_boundaries = cell_boundaries[cell_start:cell_end + 1]
+    chunks = compute_cell_chunks(sub_boundaries, TARGET_CELLS_PER_CHUNK)
+    # Adjust indices back to global coordinates
+    pixel_offset = int(cell_boundaries[cell_start])
+    chunks = [
+        (cs + cell_start, ce + cell_start, ps + pixel_offset, pe + pixel_offset)
+        for cs, ce, ps, pe in chunks
+    ]
+    print(f"Processing {len(chunks)} cell-aligned chunks (~{TARGET_CELLS_PER_CHUNK} cells each)", flush=True)
 
     # Process each chunk
     print(f"\nProcessing cells (F0: {PERCENTILE}th percentile, ±{PERCENTILE_WINDOW_RADIUS} frames)...", flush=True)
-    for i, (cell_start, cell_end, pixel_start, pixel_end) in enumerate(chunks):
+    for i, (cs, ce, pixel_start, pixel_end) in enumerate(chunks):
         num_pixels_chunk = pixel_end - pixel_start
-        print(f"  Chunk {i+1}/{len(chunks)}: cells [{cell_start}, {cell_end}), "
+        print(f"  Chunk {i+1}/{len(chunks)}: cells [{cs}, {ce}), "
               f"pixels [{pixel_start}, {pixel_end}) ({num_pixels_chunk:,} pixels)", flush=True)
 
         cell_activity, cell_activity_normalized, cell_acquisition_ms = process_cell_chunk(
             raw_values, acquisition_time_ms,
             pixel_start, pixel_end,
-            cell_start, cell_end,
+            cs, ce,
             cell_boundaries,
             PERCENTILE, PERCENTILE_WINDOW_RADIUS,
             CLIP_MIN, CLIP_MAX,
         )
 
         # Write chunk results immediately
-        cell_activity_arr[cell_start:cell_end, :].write(cell_activity).result()
-        cell_activity_norm_arr[cell_start:cell_end, :].write(cell_activity_normalized).result()
-        cell_acq_arr[cell_start:cell_end, :].write(cell_acquisition_ms).result()
+        cell_activity_arr[cs:ce, :].write(cell_activity).result()
+        cell_activity_norm_arr[cs:ce, :].write(cell_activity_normalized).result()
+        cell_acq_arr[cs:ce, :].write(cell_acquisition_ms).result()
 
-    # Update metadata
-    metadata['baseline_percentile'] = PERCENTILE
-    metadata['baseline_window_radius'] = PERCENTILE_WINDOW_RADIUS
-    metadata['spatial_smoothing'] = 'per_cell_median'
-    metadata['normalized_clip_range'] = [CLIP_MIN, CLIP_MAX]
-    save_metadata(args.zarr, metadata)
-
-    print(f"\nDone. Wrote cell_activity, cell_activity_normalized, cell_acquisition_ms to {args.zarr}", flush=True)
+    print(f"\nDone. Wrote cells [{cell_start}, {cell_end}) to {args.zarr}", flush=True)
 
 
 if __name__ == "__main__":

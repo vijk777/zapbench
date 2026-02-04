@@ -19,7 +19,15 @@ from zarr_utils import (
     SIZE_T,
     STRIDE_X, STRIDE_Y, STRIDE_Z,
     PIXEL_CHUNK_SIZE,
+    CELL_ACTIVITY_CELLS_PER_CHUNK,
+    CELL_ACTIVITY_PERCENTILE,
+    CELL_ACTIVITY_WINDOW_RADIUS,
+    CELL_ACTIVITY_CLIP_MIN,
+    CELL_ACTIVITY_CLIP_MAX,
+    TIME_CHUNK_SIZE,
     create_array,
+    load_metadata,
+    save_metadata,
 )
 
 
@@ -204,6 +212,38 @@ def write_static_arrays(arrays, xi, yi, zi, gx, gy, gz, cell_ids, num_cells):
     arrays['cell_pixel_boundaries'].write(cell_pixel_boundaries).result()
 
     print("Static arrays written successfully.", flush=True)
+
+
+def init_cell_activity_arrays(zarr_path: str):
+    """Create cell activity output arrays and write static metadata.
+
+    Must be called once before running parallel compute jobs.
+    """
+    metadata = load_metadata(zarr_path)
+    num_timesteps = metadata['num_timesteps']
+    num_cells = metadata['num_cells']
+
+    print("Creating cell activity output arrays...", flush=True)
+    create_array(
+        zarr_path, 'cell_activity',
+        (num_cells, num_timesteps), (CELL_ACTIVITY_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'float32'
+    )
+    create_array(
+        zarr_path, 'cell_activity_normalized',
+        (num_cells, num_timesteps), (CELL_ACTIVITY_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'float32'
+    )
+    create_array(
+        zarr_path, 'cell_acquisition_ms',
+        (num_cells, num_timesteps), (CELL_ACTIVITY_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'uint16'
+    )
+
+    metadata['baseline_percentile'] = CELL_ACTIVITY_PERCENTILE
+    metadata['baseline_window_radius'] = CELL_ACTIVITY_WINDOW_RADIUS
+    metadata['spatial_smoothing'] = 'per_cell_median'
+    metadata['normalized_clip_range'] = [CELL_ACTIVITY_CLIP_MIN, CELL_ACTIVITY_CLIP_MAX]
+    save_metadata(zarr_path, metadata)
+
+    print("Cell activity arrays and metadata initialized.", flush=True)
 
 
 def main():
