@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import time
 
 import numpy as np
 np.seterr(all='raise')
@@ -23,6 +24,20 @@ from zarr_utils import load_metadata, open_array, STRIDE_X, STRIDE_Y, STRIDE_Z
 # < .1% CV for the 914ms timing between adjacent z slices
 MS_PER_TIMESTEP = 914  # milliseconds between timesteps
 MS_PER_Z = 12  # milliseconds between z planes within a timestep
+
+MAX_RETRIES = 5
+TIMEOUT_S = 30
+
+
+def read_with_retry(store, label=""):
+    for attempt in range(MAX_RETRIES):
+        future = store.read()
+        try:
+            return future.result(timeout=TIMEOUT_S)
+        except TimeoutError:
+            print(f"    {label} timeout (attempt {attempt + 1}/{MAX_RETRIES}), retrying...", flush=True)
+            time.sleep(2 ** attempt)
+    raise TimeoutError(f"{label} failed after {MAX_RETRIES} attempts")
 
 
 def parse_args():
@@ -125,7 +140,7 @@ def main():
 
         # Read flow field slice for this timestep and interpolate
         # Flow field shape: [3, fz, fy, fx, t] -> slice is [3, fz, fy, fx]
-        flow_t = ds_flow[:, :, :, :, T].read().result()
+        flow_t = read_with_retry(ds_flow[:, :, :, :, T], label=f"flow T={T}")
 
         # Cubic spline interpolation at pixel positions
         coords = np.array([zi / STRIDE_Z, yi / STRIDE_Y, xi / STRIDE_X])
@@ -139,7 +154,7 @@ def main():
         ])
 
         # Read entire raw volume for this timestep
-        raw_stack = ds_raw[:, :, :, T].read().result()
+        raw_stack = read_with_retry(ds_raw[:, :, :, T], label=f"raw T={T}")
 
         # Sample values at raw coordinates (nearest neighbor)
         raw_values_batch[:, t_idx] = map_coordinates(raw_stack, raw_coords, order=0, mode='nearest')
