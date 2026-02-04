@@ -133,7 +133,7 @@ def process_cell_chunk(
     # Step 4: Aggregate to cells
     cell_activity = np.empty((num_cells_chunk, num_timesteps), dtype=np.float32)
     cell_activity_normalized = np.empty((num_cells_chunk, num_timesteps), dtype=np.float32)
-    cell_acquisition_ms = np.empty((num_cells_chunk, num_timesteps), dtype=np.uint32)
+    cell_acquisition_ms = np.empty((num_cells_chunk, num_timesteps), dtype=np.uint16)
 
     # Load acquisition times
     acq = acquisition_time_ms[pixel_start:pixel_end, :].read().result().astype(np.float64)
@@ -145,7 +145,7 @@ def process_cell_chunk(
         if num_pixels > 0:
             cell_activity[c, :] = dF[p_start:p_end, :].mean(axis=0)
             cell_activity_normalized[c, :] = dF_norm[p_start:p_end, :].mean(axis=0)
-            cell_acquisition_ms[c, :] = np.round(acq[p_start:p_end, :].mean(axis=0)).astype(np.uint32)
+            cell_acquisition_ms[c, :] = np.round(acq[p_start:p_end, :].mean(axis=0)).astype(np.uint16)
         else:
             cell_activity[c, :] = 0
             cell_activity_normalized[c, :] = 0
@@ -188,7 +188,7 @@ def main():
     )
     cell_acq_arr = create_array(
         args.zarr, 'cell_acquisition_ms',
-        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'uint32'
+        (num_cells, num_timesteps), (TARGET_CELLS_PER_CHUNK, TIME_CHUNK_SIZE), 'uint16'
     )
 
     # Process each chunk

@@ -19,6 +19,8 @@ from zarr_utils import load_metadata, open_array, STRIDE_X, STRIDE_Y, STRIDE_Z
 
 
 # Acquisition timing constants
+# ~3% CV around 12ms per slice, symmetric
+# < .1% CV for the 914ms timing between adjacent z slices
 MS_PER_TIMESTEP = 914  # milliseconds between timesteps
 MS_PER_Z = 12  # milliseconds between z planes within a timestep
 
@@ -143,8 +145,10 @@ def main():
         raw_values_batch[:, t_idx] = map_coordinates(raw_stack, raw_coords, order=0, mode='nearest')
         raw_z_batch[:, t_idx] = np.round(raw_coords[2]).astype(np.int8)
 
-        # Compute acquisition time: T * 914ms + raw_z * 12ms
-        acq_time_batch[:, t_idx] = T * MS_PER_TIMESTEP + raw_z_batch[:, t_idx].astype(np.int32) * MS_PER_Z
+        # Compute acquisition time offset = raw_z * 12ms
+        # The offset is relative to the nominal start time of each batch
+        # which is 914ms x T - we only care about the stagger
+        acq_time_batch[:, t_idx] = raw_z_batch[:, t_idx].astype(np.uint16) * MS_PER_Z
 
     # Write batch to output
     print(f"Writing batch to zarr [:, {start_t}:{end_t}]...", flush=True)
