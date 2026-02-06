@@ -6,6 +6,7 @@ import json
 import os
 
 import numpy as np
+np.seterr(all='raise')
 import scipy.signal
 from scipy.spatial import KDTree
 import tensorstore as ts
