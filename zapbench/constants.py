@@ -125,3 +125,81 @@ RASTERMAP_SPECS = {
         }
     }
 }
+
+# Ephys sampling frequency
+EPHYS_SAMPLING_FREQUENCY_HZ = 6000
+
+# Ephys column definitions with dtypes and source channel indices
+EPHYS_COLUMNS = [
+    {'name': 'ephys_ch1', 'dtype': 'float32', 'source_channel': 0,
+     'description': 'Electrophysiology channel 1 - muscular activity'},
+    {'name': 'ephys_ch2', 'dtype': 'float32', 'source_channel': 1,
+     'description': 'Electrophysiology channel 2 - muscular activity (better for emf3)'},
+    {'name': 'ttl', 'dtype': 'float32', 'source_channel': 2,
+     'description': 'TTL triggers for volume imaging sync'},
+    {'name': 'stimParam3', 'dtype': 'float32', 'source_channel': 6,
+     'description': 'Stimulus parameter 3 (meaning varies by condition)'},
+    {'name': 'stimParam4', 'dtype': 'int8', 'source_channel': 3,
+     'description': 'Stimulus parameter 4 (meaning varies by condition)'},
+    {'name': 'visual_velocity', 'dtype': 'float32', 'source_channel': 8,
+     'description': 'Grating velocity (+ = backward, - = forward)'},
+]
+
+# Per-condition stimParam metadata
+# Each entry: (name, stimParam3 description, stimParam4 description)
+CONDITION_STIM_METADATA = [
+    # 0: gain
+    {
+        'name': 'gain',
+        'stimParam3': {'description': 'gain level', 'values': {'1': 'low', '2': 'high'}},
+        'stimParam4': {'description': 'unused'},
+    },
+    # 1: dots
+    {
+        'name': 'dots',
+        'stimParam3': {'description': 'orientation (degrees)'},
+        'stimParam4': {'description': 'coherence'},
+    },
+    # 2: flash
+    {
+        'name': 'flash',
+        'stimParam3': {'description': 'luminance', 'values': {'0': 'dark', '1': 'bright'}},
+        'stimParam4': {'description': 'unused'},
+    },
+    # 3: taxis
+    {
+        'name': 'taxis',
+        'stimParam3': {'description': 'left brightness', 'values': {'0': 'dark', '1': 'bright'}},
+        'stimParam4': {'description': 'right brightness', 'values': {'0': 'dark', '1': 'bright'}},
+    },
+    # 4: turning
+    {
+        'name': 'turning',
+        'stimParam3': {'description': 'velocity'},
+        'stimParam4': {'description': 'orientation', 'values': {'1': 'forward', '-1': 'forward', '90': 'sideways', '-90': 'sideways'}},
+    },
+    # 5: position
+    {
+        'name': 'position',
+        'stimParam3': {'description': 'grating type', 'values': {'-1': 'long forward', '0': 'stationary', '1': 'short pulse'}},
+        'stimParam4': {'description': 'delay between gratings'},
+    },
+    # 6: open loop
+    {
+        'name': 'open_loop',
+        'stimParam3': {'description': 'mode', 'values': {'1': 'closed loop', '2': 'open loop'}},
+        'stimParam4': {'description': 'orientation'},
+    },
+    # 7: rotation
+    {
+        'name': 'rotation',
+        'stimParam3': {'description': 'undocumented'},
+        'stimParam4': {'description': 'undocumented'},
+    },
+    # 8: dark
+    {
+        'name': 'dark',
+        'stimParam3': {'description': 'unused'},
+        'stimParam4': {'description': 'unused'},
+    },
+]
