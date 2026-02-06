@@ -13,8 +13,6 @@ import tensorstore as ts
 from zapbench.constants import (
     EPHYS_COLUMNS,
     EPHYS_SAMPLING_FREQUENCY_HZ,
-    TEST_FRACTION,
-    VAL_FRACTION,
 )
 
 # Source channel index for trial_id in raw data
@@ -247,10 +245,6 @@ def main():
                 'num_z_slices': NUM_Z_SLICES,
                 'samples_per_z': SAMPLES_PER_Z,
                 'samples_per_volume': SAMPLES_PER_VOLUME,
-            },
-            'splits': {
-                'val_fraction': VAL_FRACTION,
-                'test_fraction': TEST_FRACTION,
             },
         },
     }
