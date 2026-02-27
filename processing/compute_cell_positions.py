@@ -48,14 +48,14 @@ def load_segmentation():
         'kvstore': f'{GS_URI}/segmentation',
     }).result()
 
-    # Read zarr metadata for any pixel size info
-    kvstore = ts.KvStore.open(f'{GS_URI}/segmentation/').result()
+    # Read raw volume zarr metadata for voxel size info
+    kvstore = ts.KvStore.open(f'{GS_URI}/raw/').result()
     zarr_json_bytes = kvstore.read('zarr.json').result().value
-    zarr_meta = json.loads(zarr_json_bytes)
+    raw_meta = json.loads(zarr_json_bytes)
 
     segmentation = read_with_retry(ds, label="segmentation")
     print(f"  Shape: {segmentation.shape}, dtype: {segmentation.dtype}", flush=True)
-    return segmentation, zarr_meta
+    return segmentation, raw_meta
 
 
 def compute_centroids(segmentation):
@@ -90,7 +90,31 @@ def compute_centroids(segmentation):
     return centroids.astype(np.float32), num_cells
 
 
-def write_zarr(centroids, num_cells, volume_shape, zarr_meta):
+def parse_voxel_size(raw_meta):
+    """Extract voxel size [x, y, z] in nm from raw volume zarr metadata.
+
+    The raw zarr.json stores dimension_units as e.g. ["406 nm", "406 nm", "4000 nm", "0.9141 s"]
+    for dimensions [x, y, z, t]. We parse the spatial dimensions (first 3).
+    """
+    dimension_units = raw_meta.get('attributes', {}).get('dimension_units', [])
+    voxel_size_nm = []
+    for unit_str in dimension_units[:3]:  # x, y, z only
+        parts = unit_str.strip().split()
+        value = float(parts[0])
+        unit = parts[1] if len(parts) > 1 else 'nm'
+        # Normalize to nanometers
+        if unit == 'nm':
+            voxel_size_nm.append(value)
+        elif unit == 'um' or unit == 'µm':
+            voxel_size_nm.append(value * 1000)
+        elif unit == 'mm':
+            voxel_size_nm.append(value * 1e6)
+        else:
+            voxel_size_nm.append(value)  # assume nm
+    return voxel_size_nm
+
+
+def write_zarr(centroids, num_cells, volume_shape, raw_meta):
     """Write centroids to a zarr v3 store with metadata."""
     print(f"Writing {OUTPUT_ZARR}...", flush=True)
 
@@ -132,12 +156,11 @@ def write_zarr(centroids, num_cells, volume_shape, zarr_meta):
         'volume_shape_xyz': list(int(s) for s in volume_shape),
     }
 
-    # Propagate any pixel size metadata from the segmentation zarr
-    seg_attrs = zarr_meta.get('attributes', {})
-    for key in ('pixel_size', 'pixel_size_um', 'voxel_size', 'resolution',
-                'pixel_resolution', 'scale'):
-        if key in seg_attrs:
-            meta['attributes'][key] = seg_attrs[key]
+    # Add voxel size from raw volume metadata
+    voxel_size_nm = parse_voxel_size(raw_meta)
+    if voxel_size_nm:
+        meta['attributes']['voxel_size_xyz_nm'] = voxel_size_nm
+        print(f"  Voxel size (x, y, z): {voxel_size_nm} nm", flush=True)
 
     with open(zarr_json_path, 'w') as f:
         json.dump(meta, f, indent=2)
@@ -147,13 +170,13 @@ def write_zarr(centroids, num_cells, volume_shape, zarr_meta):
 
 
 def main():
-    segmentation, zarr_meta = load_segmentation()
+    segmentation, raw_meta = load_segmentation()
     volume_shape = segmentation.shape  # (X, Y, Z)
 
     centroids, num_cells = compute_centroids(segmentation)
     del segmentation
 
-    write_zarr(centroids, num_cells, volume_shape, zarr_meta)
+    write_zarr(centroids, num_cells, volume_shape, raw_meta)
     print("Done.", flush=True)
 
 
